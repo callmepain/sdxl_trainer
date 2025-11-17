@@ -14,6 +14,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from diffusers import AutoencoderKL, StableDiffusionXLPipeline, DDPMScheduler
 from diffusers.training_utils import EMAModel
+from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer
 from tqdm.auto import tqdm
 from dataset import BucketBatchSampler, SimpleCaptionDataset
@@ -55,6 +56,13 @@ DEFAULT_CONFIG = {
         "max_grad_norm": None,
         "detect_anomaly": True,
         "lr_warmup_steps": 0,
+        "tensorboard": {
+            "enabled": False,
+            "log_dir": None,
+            "base_dir": "./logs/tensorboard",
+            "log_grad_norm": False,
+            "log_scaler": True,
+        },
     },
     "data": {
         "image_dir": "./data/images",
@@ -122,6 +130,22 @@ def _bucket_sort_key(value: str):
     except Exception:
         pass
     return (float("inf"), value)
+
+
+def _compute_grad_norm(optimizer) -> float:
+    norms = []
+    for group in optimizer.param_groups:
+        for param in group["params"]:
+            if param.grad is None:
+                continue
+            grad = param.grad.detach()
+            if grad.is_sparse:
+                grad = grad.coalesce().values()
+            norms.append(grad.float().norm(2))
+    if not norms:
+        return 0.0
+    stacked = torch.stack(norms)
+    return torch.norm(stacked).item()
 
 
 def _deep_update(base: dict, updates: dict) -> dict:
@@ -348,6 +372,25 @@ if max_grad_norm is not None:
     max_grad_norm = float(max_grad_norm)
 detect_anomaly = bool(training_cfg.get("detect_anomaly", True))
 lr_warmup_steps = int(training_cfg.get("lr_warmup_steps", 0) or 0)
+tensorboard_cfg = training_cfg.get("tensorboard", {}) or {}
+use_tensorboard = bool(tensorboard_cfg.get("enabled", False))
+tb_log_grad_norm = bool(tensorboard_cfg.get("log_grad_norm", False))
+tb_log_scaler = bool(tensorboard_cfg.get("log_scaler", True))
+tb_writer = None
+if use_tensorboard:
+    log_dir_value = tensorboard_cfg.get("log_dir")
+    if log_dir_value:
+        tb_log_dir = Path(log_dir_value).expanduser()
+    else:
+        base_dir = Path(tensorboard_cfg.get("base_dir", "./logs/tensorboard")).expanduser()
+        run_dir_name = run_name or "run"
+        tb_log_dir = base_dir / run_dir_name
+    tb_log_dir.mkdir(parents=True, exist_ok=True)
+    tb_writer = SummaryWriter(log_dir=str(tb_log_dir))
+    try:
+        tb_writer.add_text("run/config", json.dumps(cfg, indent=2))
+    except Exception:
+        pass
 
 checkpoint_path_cfg = export_cfg.get("checkpoint_path")
 if checkpoint_path_cfg:
@@ -398,6 +441,10 @@ if bucket_batch_size_map:
 print(f"Gradient Accumulation Steps: {grad_accum_steps}")
 print(f"Effektive Batchsize (pro Step): {effective_batch}")
 print("================================")
+if tb_writer is not None:
+    tb_writer.add_scalar("data/effective_batch", effective_batch, 0)
+    tb_writer.add_scalar("data/grad_accum_steps", grad_accum_steps, 0)
+    tb_writer.add_text("run/meta", f"model_id: {model_id}\nrun_name: {run_name or 'n/a'}\noutput_dir: {output_dir}")
 
 train_dataset = SimpleCaptionDataset(
     img_dir=data_cfg["image_dir"],
@@ -411,6 +458,8 @@ train_dataset = SimpleCaptionDataset(
     bucket_config=bucket_cfg,
     latent_cache_config=latent_cache_cfg,
 )
+if tb_writer is not None:
+    tb_writer.add_scalar("data/num_samples", len(train_dataset), 0)
 
 if bucket_enabled:
     bucket_counts = Counter(train_dataset.sample_buckets)
@@ -420,6 +469,8 @@ if bucket_enabled:
             normalized_key = _normalize_bucket_key(key) or key
             effective_size = bucket_batch_size_map.get(normalized_key, bucket_default_batch_size)
             print(f"  {key}: {bucket_counts[key]} samples (batch_size={effective_size})")
+            if tb_writer is not None:
+                tb_writer.add_scalar(f"data/buckets/{key}", bucket_counts[key], 0)
 
     bucket_sampler = BucketBatchSampler(
         train_dataset.sample_buckets,
@@ -718,11 +769,16 @@ accum_counter = 0
 last_loss_value = 0.0
 
 def optimizer_step_fn(loss_value, current_step, current_accum):
-    if max_grad_norm and max_grad_norm > 0:
+    grad_norm_value = None
+    need_unscale = ((max_grad_norm is not None and max_grad_norm > 0) or (tb_writer is not None and tb_log_grad_norm))
+    if need_unscale:
         scaler.unscale_(optimizer)
-        params_to_clip = [p for group in optimizer.param_groups for p in group["params"] if p.grad is not None]
-        if params_to_clip:
-            clip_grad_norm_(params_to_clip, max_norm=max_grad_norm)
+        if tb_writer is not None and tb_log_grad_norm:
+            grad_norm_value = _compute_grad_norm(optimizer)
+        if max_grad_norm is not None and max_grad_norm > 0:
+            params_to_clip = [p for group in optimizer.param_groups for p in group["params"] if p.grad is not None]
+            if params_to_clip:
+                clip_grad_norm_(params_to_clip, max_norm=max_grad_norm)
 
     scaler.step(optimizer)
     scaler.update()
@@ -742,6 +798,19 @@ def optimizer_step_fn(loss_value, current_step, current_accum):
 
     if log_every is not None and current_step % log_every == 0:
         print(f"step {current_step} | loss {display_loss:.4f}")
+
+    if tb_writer is not None:
+        tb_writer.add_scalar("train/loss", display_loss, current_step)
+        tb_writer.add_scalar("train/lr_unet", optimizer.param_groups[0]["lr"], current_step)
+        if train_text_encoders and len(optimizer.param_groups) > 1:
+            te_lrs = [group["lr"] for group in optimizer.param_groups[1:]]
+            if te_lrs:
+                tb_writer.add_scalar("train/lr_text_encoder", sum(te_lrs) / len(te_lrs), current_step)
+        if grad_norm_value is not None:
+            tb_writer.add_scalar("train/grad_norm", grad_norm_value, current_step)
+        if tb_log_scaler:
+            tb_writer.add_scalar("train/amp_scale", scaler.get_scale(), current_step)
+        tb_writer.add_scalar("train/global_step", current_step, current_step)
 
     if checkpoint_every is not None and current_step % checkpoint_every == 0:
         if ema_unet is not None:
@@ -877,6 +946,10 @@ if ema_unet is not None:
     ema_unet.copy_to(unet.parameters())
 
 pipe.save_pretrained(output_dir)
+
+if tb_writer is not None:
+    tb_writer.flush()
+    tb_writer.close()
 
 
 def _run_converter_script(script_path: Path, model_dir: Path, checkpoint_path: Path, cfg: dict) -> None:

@@ -14,6 +14,7 @@ Dieses Projekt enthält ein leichtgewichtiges Trainings-Setup, um eigene Stable-
 - Python 3.12 (bereits in `venv/` vorbereitet)
 - CUDA-fähige GPU (für FlashAttention/AMP erforderlich)
 - Abhängigkeiten sind im virtuellen Environment installiert (`pip install -r requirements.txt` falls vorhanden)
+- Für TensorBoard-Monitoring: `pip install tensorboard` (im aktuellen PyTorch-Stack meist bereits enthalten)
 
 ## Konfiguration
 
@@ -45,6 +46,18 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `max_grad_norm`: Gradient-Clipping pro Optimizer-Step (z. B. 1.0). `null` deaktiviert das Feature.
 - `detect_anomaly`: bricht das Training ab, sobald NaN/Inf im Loss auftauchen.
 - `lr_warmup_steps`: Lineares Warmup der Lernrate über die ersten N Optimizer-Schritte (typisch 100–500).
+- `tensorboard`: Block zur Aktivierung des TensorBoard-Loggings, z. B.:
+  ```json
+  "tensorboard": {
+    "enabled": true,
+    "base_dir": "./logs/tensorboard",
+    "log_grad_norm": true,
+    "log_scaler": true
+  }
+  ```
+  - `log_dir`: optionaler fester Pfad; wenn leer, wird `{base_dir}/{run.name}` verwendet.
+  - `log_grad_norm`: loggt die grad-Norm (erfordert `scaler.unscale_`, daher minimaler Overhead).
+  - `log_scaler`: schreibt den aktuellen AMP-Scale-Wert.
 
 ### `data`
 - `image_dir`: Ordner mit Bildern (PNG/JPG/WebP)
@@ -92,6 +105,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `training.max_grad_norm` aktiviert Gradient-Clipping (z. B. 1.0), `training.detect_anomaly` bricht bei NaN/Inf sofort ab.
 - `training.lr_warmup_steps` erlaubt lineares Warmup der Lernrate (empfohlen 100–500 Schritte).
 - Beim Start werden – sofern Buckets aktiv sind – die tatsächlichen Bucket-Verteilungen inklusive effektiver Batchgrößen geloggt.
+- Für TensorBoard: `tensorboard --logdir ./logs/tensorboard` starten (oder den in der Config gesetzten Pfad) und im Browser öffnen. Es werden Loss, Lernraten (UNet/Text-Encoder), Grad-Norm (optional), AMP-Scale, Bucket-Verteilung sowie Basis-Metadaten (Effektiv-Batchsize, Anzahl Samples) geloggt.
 
 ## Training starten
 

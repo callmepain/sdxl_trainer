@@ -31,7 +31,14 @@
     "snr_gamma": null,
     "max_grad_norm": null,
     "detect_anomaly": true,
-    "lr_warmup_steps": 0
+    "lr_warmup_steps": 0,
+    "tensorboard": {
+      "enabled": false,
+      "log_dir": null,
+      "base_dir": "./logs/tensorboard",
+      "log_grad_norm": false,
+      "log_scaler": true
+    }
   },
   "data": {
     "image_dir": "./data/images",
