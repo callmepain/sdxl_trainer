@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtualenv
+venv/
+.env/
+
+# Outputs / Models / Logs
+sdxl_ff_out*/
+output/
+new_beginning/
+logs/
+wandb/
+*.safetensors
+*.ckpt
+*.pt
+
+# Daten
+data/images/
+data/*
+
+# Lokale Config
+config.json

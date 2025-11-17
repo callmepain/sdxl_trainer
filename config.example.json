@@ -1,0 +1,53 @@
+{
+  "device": "cuda",
+  "model": {
+    "id": "./sdxl_ff_out",
+    "use_ema": true,
+    "use_bf16": true,
+    "use_gradient_checkpointing": true
+  },
+  "training": {
+    "output_dir": ".output/new_beginning_v_0_0_3",
+    "batch_size": 4,
+    "num_steps": null,
+    "num_epochs": 1,
+    "lr_unet": 5e-06,
+    "lr_text_encoder": 1e-06,
+    "log_every": 50,
+    "checkpoint_every": 1000,
+    "grad_accum_steps": 1,
+    "noise_offset": 0.0,
+    "min_sigma": null,
+    "min_sigma_warmup_steps": 0,
+    "prediction_type": null
+  },
+  "data": {
+    "image_dir": "./data/images",
+    "size": 1024,
+    "shuffle": true,
+    "num_workers": 4,
+    "pin_memory": true,
+    "caption_dropout_prob": 0.0,
+    "caption_shuffle_prob": 0.0,
+    "caption_shuffle_separator": ",",
+    "caption_shuffle_min_tokens": 2
+  },
+  "optimizer": {
+    "weight_decay": 0.01,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08
+  },
+  "export": {
+    "save_single_file": true,
+    "checkpoint_path": ".output/safetensors/new_beginning_v_0_0_3.safetensors",
+    "converter_script": null,
+    "converter_url": "https://raw.githubusercontent.com/huggingface/diffusers/main/scripts/convert_diffusers_to_original_stable_diffusion.py",
+    "force_download": false,
+    "half_precision": true,
+    "use_safetensors": true,
+    "extra_args": []
+  }
+}
