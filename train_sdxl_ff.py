@@ -174,13 +174,44 @@ def load_config(path: Path) -> dict:
 
 cfg = load_config(CONFIG_PATH)
 
+flash_attn_func = None
+flash_attn_backend = None
+flash_attn_supports_dropout = False
+flash_attn_supports_softmax_scale = False
+
 try:
-    from flash_attn import flash_attn_func
+    from flash_attn_interface import flash_attn_func  # FlashAttention-3 wheels expose this module
+    flash_attn_backend = "flash_attn_interface"
 except ImportError:
-    flash_attn_func = None
+    try:
+        from flash_attn.flash_attn_interface import flash_attn_func  # FlashAttention<=2.x
+        flash_attn_backend = "flash_attn.flash_attn_interface"
+    except ImportError:
+        try:
+            from flash_attn import flash_attn_func  # Legacy API
+            flash_attn_backend = "flash_attn"
+        except ImportError:
+            flash_attn_func = None
+
+if flash_attn_func is None:
     warnings.warn(
-        "FlashAttention-3 wurde nicht gefunden. Verwende Standard-Attention – aktiviere die richtige venv oder installiere flash-attn>=3.",
+        "FlashAttention wurde nicht gefunden. Verwende Standard-Attention – aktiviere die richtige venv oder installiere flash-attn-3.",
         stacklevel=2,
+    )
+else:
+    import inspect
+
+    try:
+        signature = inspect.signature(flash_attn_func)
+        flash_attn_supports_dropout = "dropout_p" in signature.parameters
+        flash_attn_supports_softmax_scale = "softmax_scale" in signature.parameters
+    except (ValueError, TypeError):
+        pass
+
+    print(
+        f"FlashAttention aktiviert (Backend: {flash_attn_backend}, "
+        f"dropout={'ja' if flash_attn_supports_dropout else 'nein'}, "
+        f"scale_kw={'ja' if flash_attn_supports_softmax_scale else 'nein'})"
     )
 
 
@@ -191,6 +222,7 @@ class FlashAttnProcessor:
 
     def __init__(self):
         self._warned = False
+        self._dropout_warned = False
 
     def _can_use_flash(self, hidden_states, attention_mask, head_dim):
         if flash_attn_func is None:
@@ -272,13 +304,23 @@ class FlashAttnProcessor:
                 flash_value = value.transpose(1, 2).contiguous()
                 dropout_p = attn.dropout if attn.training else 0.0
                 attn_scale = attn.scale if getattr(attn, "scale_qk", True) else None
+                flash_kwargs = {"causal": False}
+                if attn_scale is not None and flash_attn_supports_softmax_scale:
+                    flash_kwargs["softmax_scale"] = attn_scale
+                if dropout_p and dropout_p > 0.0:
+                    if flash_attn_supports_dropout:
+                        flash_kwargs["dropout_p"] = dropout_p
+                    elif not self._dropout_warned:
+                        warnings.warn(
+                            "FlashAttention-Backend unterstützt kein Dropout. Dropout wird ignoriert.",
+                            stacklevel=2,
+                        )
+                        self._dropout_warned = True
                 flash_hidden_states = flash_attn_func(
                     flash_query,
                     flash_key,
                     flash_value,
-                    dropout_p=dropout_p,
-                    softmax_scale=attn_scale,
-                    causal=False,
+                    **flash_kwargs,
                 )
                 hidden_states = flash_hidden_states.transpose(1, 2)
             except RuntimeError as err:
@@ -366,7 +408,18 @@ noise_offset = float(training_cfg.get("noise_offset", 0.0) or 0.0)
 min_sigma = training_cfg.get("min_sigma")
 if min_sigma is not None:
     min_sigma = float(min_sigma)
-min_sigma_warmup_steps = max(0, int(training_cfg.get("min_sigma_warmup_steps", 0)))
+if min_sigma is not None and min_sigma <= 0:
+    min_sigma = None
+min_sigma_warmup_steps = int(training_cfg.get("min_sigma_warmup_steps", 0) or 0)
+if min_sigma is not None and min_sigma_warmup_steps <= 0:
+    warnings.warn(
+        "min_sigma ist gesetzt, aber min_sigma_warmup_steps <= 0. Feature wird deaktiviert.",
+        stacklevel=2,
+    )
+    min_sigma = None
+    min_sigma_warmup_steps = 0
+else:
+    min_sigma_warmup_steps = max(0, min_sigma_warmup_steps)
 prediction_type_override = training_cfg.get("prediction_type")
 snr_gamma = training_cfg.get("snr_gamma")
 if snr_gamma is not None:
@@ -444,6 +497,10 @@ if bucket_batch_size_map:
     print(f"Bucket-spezifische Batchsizes: {bucket_batch_size_map}")
 print(f"Gradient Accumulation Steps: {grad_accum_steps}")
 print(f"Effektive Batchsize (pro Step): {effective_batch}")
+if min_sigma is not None:
+    print(f"Min-Sigma konfiguriert: wert={min_sigma}, warmup_steps={min_sigma_warmup_steps}")
+else:
+    print("Min-Sigma deaktiviert.")
 print("================================")
 if tb_writer is not None:
     tb_writer.add_scalar("data/effective_batch", effective_batch, 0)
@@ -545,12 +602,15 @@ def encode_text(captions_batch):
     return text_embeds.to(dtype), pooled_embeds.to(dtype)
 
 
+VAE_SCALING_FACTOR = 0.18215
+
+
 def prepare_latents(pixel_values, generator=None):
     pixel_values = pixel_values.to(device=device, dtype=dtype)
     # VAE encode
     with torch.no_grad():
         posterior = vae.encode(pixel_values).latent_dist
-        latents = posterior.sample(generator=generator) * 0.18215
+        latents = posterior.sample(generator=generator) * VAE_SCALING_FACTOR
     return latents
 
 
@@ -591,11 +651,12 @@ def ensure_latent_cache(dataset, cache_cfg):
     vae_local = AutoencoderKL.from_pretrained(model_id, subfolder="vae", torch_dtype=dtype)
     vae_local.to(device)
     vae_local.eval()
+    cache_scaling_factor = getattr(getattr(vae_local, "config", None), "scaling_factor", 0.18215)
 
     @torch.no_grad()
     def build_latents(pixel_batch):
         posterior = vae_local.encode(pixel_batch).latent_dist
-        latents = posterior.sample() * 0.18215
+        latents = posterior.sample() * cache_scaling_factor
         return latents
 
     bucket_groups = {}
@@ -649,6 +710,11 @@ vae = pipe.vae
 te1 = pipe.text_encoder
 te2 = pipe.text_encoder_2
 
+vae_scaling_factor = getattr(getattr(vae, "config", None), "scaling_factor", None)
+if vae_scaling_factor is not None:
+    VAE_SCALING_FACTOR = float(vae_scaling_factor)
+print(f"VAE scaling_factor verwendet: {VAE_SCALING_FACTOR}")
+
 if use_torch_compile:
     compile_kwargs = dict(torch_compile_kwargs)
     unet = torch.compile(unet, **compile_kwargs)
@@ -683,7 +749,7 @@ prediction_type = noise_scheduler.config.prediction_type
 alphas_cumprod_tensor = noise_scheduler.alphas_cumprod.to(device=device)
 
 sigma_lookup = None
-if min_sigma is not None and min_sigma > 0:
+if min_sigma is not None:
     alpha_vals = torch.clamp(alphas_cumprod_tensor.to(torch.float32), min=1e-9, max=1.0).clone()
     sigma_lookup = torch.sqrt(torch.clamp((1 - alpha_vals) / alpha_vals, min=0.0))
     sigma_lookup = torch.nan_to_num(
@@ -692,6 +758,7 @@ if min_sigma is not None and min_sigma > 0:
         posinf=torch.finfo(sigma_lookup.dtype).max,
         neginf=0.0,
     )
+    sigma_lookup = sigma_lookup.to(device=device)
 
 # 5) Optimizer mit Param-Groups
 param_groups = [
@@ -724,33 +791,56 @@ if lr_warmup_steps and lr_warmup_steps > 0:
 
     lr_scheduler = LambdaLR(optimizer, lr_lambda=_lr_warmup_lambda)
 
-def build_min_sigma_enforcer(sigma_lookup_tensor, min_sigma_value, warmup_steps):
-    if sigma_lookup_tensor is None or min_sigma_value is None or min_sigma_value <= 0:
-        return lambda timesteps, _: timesteps
+class MinSigmaController:
+    def __init__(self, sigma_lookup_tensor, min_sigma_value, warmup_steps):
+        self.active = (
+            sigma_lookup_tensor is not None
+            and min_sigma_value is not None
+            and min_sigma_value > 0
+            and warmup_steps > 0
+        )
+        self.sigma_lookup = sigma_lookup_tensor
+        self.min_sigma = min_sigma_value if self.active else None
+        self.warmup_steps = warmup_steps if self.active else 0
+        self.min_timestep = None
+        self._min_timestep_tensor = None
+        if self.active:
+            target = torch.tensor(
+                self.min_sigma, device=self.sigma_lookup.device, dtype=self.sigma_lookup.dtype
+            )
+            idx = torch.searchsorted(self.sigma_lookup, target, right=False)
+            idx = torch.clamp(idx, max=self.sigma_lookup.shape[0] - 1)
+            self.min_timestep = int(idx.item())
+            if self.min_timestep <= 0:
+                self.active = False
 
-    def _current_threshold(step_idx: int) -> float:
-        if warmup_steps <= 0:
-            return min_sigma_value
-        progress = min(max(step_idx, 0) / float(warmup_steps), 1.0)
-        return max(0.0, min_sigma_value * (1.0 - progress))
+    def __call__(self, timesteps: torch.LongTensor, step_idx: int):
+        if not self.active or self.min_timestep is None:
+            return timesteps, None, None
 
-    def _enforce(timesteps: torch.LongTensor, step_idx: int) -> torch.LongTensor:
-        threshold = _current_threshold(step_idx)
-        if threshold <= 0.0:
-            return timesteps
-        target = torch.tensor(threshold, device=sigma_lookup_tensor.device, dtype=sigma_lookup_tensor.dtype)
-        idx = torch.searchsorted(sigma_lookup_tensor, target, right=False)
-        idx = torch.clamp(idx, max=sigma_lookup_tensor.shape[0] - 1)
-        idx_value = int(idx.item())
-        if idx_value <= 0:
-            return timesteps
-        limit = torch.full_like(timesteps, idx_value)
-        return torch.maximum(timesteps, limit)
+        sigma_before = self.sigma_lookup.index_select(0, timesteps)
 
-    return _enforce
+        if step_idx < self.warmup_steps:
+            return timesteps, sigma_before, sigma_before
+
+        if self._min_timestep_tensor is None or self._min_timestep_tensor.device != timesteps.device:
+            self._min_timestep_tensor = torch.tensor(
+                self.min_timestep, device=timesteps.device, dtype=timesteps.dtype
+            )
+        min_lim = self._min_timestep_tensor
+        adjusted = torch.clamp(timesteps, min=min_lim)
+        sigma_after = self.sigma_lookup.index_select(0, adjusted)
+        return adjusted, sigma_before, sigma_after
 
 
-enforce_min_sigma = build_min_sigma_enforcer(sigma_lookup, min_sigma, min_sigma_warmup_steps)
+enforce_min_sigma = MinSigmaController(sigma_lookup, min_sigma, min_sigma_warmup_steps)
+if enforce_min_sigma.active:
+    print(
+        f"Min-Sigma Enforcement aktiv (min_sigma={min_sigma}, warmup_steps={enforce_min_sigma.warmup_steps}, "
+        f"min_timestep={enforce_min_sigma.min_timestep})"
+    )
+elif min_sigma is not None:
+    print("Min-Sigma-Konfiguration erkannt, aber Enforcement ist deaktiviert (Warmup oder Grenzwert unwirksam).")
 
 
 # 9) Training Loop
@@ -861,7 +951,11 @@ while True:
                 device=device,
                 dtype=torch.long,
             )
-            timesteps = enforce_min_sigma(timesteps, global_step)
+            timesteps, sigma_before, sigma_after = enforce_min_sigma(timesteps, global_step)
+            if tb_writer is not None and sigma_before is not None:
+                tb_writer.add_scalar("train/sigma/original", sigma_before.mean().item(), global_step)
+                if sigma_after is not None and global_step >= enforce_min_sigma.warmup_steps:
+                    tb_writer.add_scalar("train/sigma/clamped", sigma_after.mean().item(), global_step)
 
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
