@@ -57,6 +57,7 @@ DEFAULT_CONFIG = {
         "max_grad_norm": None,
         "detect_anomaly": True,
         "lr_warmup_steps": 0,
+        "ema_update_every": 10,
         "tensorboard": {
             "enabled": False,
             "log_dir": None,
@@ -445,6 +446,10 @@ if max_grad_norm is not None:
     max_grad_norm = float(max_grad_norm)
 detect_anomaly = bool(training_cfg.get("detect_anomaly", True))
 lr_warmup_steps = int(training_cfg.get("lr_warmup_steps", 0) or 0)
+ema_update_every = int(training_cfg.get("ema_update_every", 10) or 10)
+if ema_update_every < 1:
+    warnings.warn("ema_update_every < 1 ist ungültig – fallback auf 1.", stacklevel=2)
+    ema_update_every = 1
 tensorboard_cfg = training_cfg.get("tensorboard", {}) or {}
 use_tensorboard = bool(tensorboard_cfg.get("enabled", False))
 tb_log_grad_norm = bool(tensorboard_cfg.get("log_grad_norm", False))
@@ -867,6 +872,11 @@ pbar = tqdm(total=total_progress_steps, desc="SDXL Training", unit="step")
 accum_counter = 0
 last_loss_value = 0.0
 
+ema_start_step = lr_warmup_steps if use_ema else 0
+if use_ema:
+    print(f"EMA aktiviert (decay={ema_decay}, start_step={ema_start_step}, update_every={ema_update_every})")
+
+
 def optimizer_step_fn(loss_value, current_step, current_accum):
     grad_norm_value = None
     need_unscale = ((max_grad_norm is not None and max_grad_norm > 0) or (tb_writer is not None and tb_log_grad_norm))
@@ -887,8 +897,14 @@ def optimizer_step_fn(loss_value, current_step, current_accum):
     optimizer.zero_grad(set_to_none=True)
     current_accum = 0
 
-    if ema_unet is not None:
-        ema_unet.step(unet.parameters())
+    ema_updated = False
+    if ema_unet is not None and current_step >= ema_start_step:
+        if (current_step - ema_start_step) % ema_update_every == 0:
+            ema_unet.step(unet.parameters())
+            ema_updated = True
+
+    if current_step >= ema_start_step:
+        print(f"EMA update this step: {'yes' if ema_updated else 'no'}")
 
     current_step += 1
     display_loss = float(loss_value) if loss_value is not None else 0.0

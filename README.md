@@ -47,6 +47,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `max_grad_norm`: Gradient-Clipping pro Optimizer-Step (z. B. 1.0). `null` deaktiviert das Feature.
 - `detect_anomaly`: bricht das Training ab, sobald NaN/Inf im Loss auftauchen.
 - `lr_warmup_steps`: Lineares Warmup der Lernrate über die ersten N Optimizer-Schritte (typisch 100–500).
+- `ema_update_every`: Wie oft (in Steps) die EMA nach `lr_warmup_steps` aktualisiert wird; Standard 10. Davor bleibt EMA inaktiv.
 - `tensorboard`: Block zur Aktivierung des TensorBoard-Loggings, z. B.:
   ```json
   "tensorboard": {
