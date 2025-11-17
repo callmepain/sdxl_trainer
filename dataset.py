@@ -8,6 +8,7 @@ from safetensors.torch import load_file, save_file
 from torch.utils.data import Dataset, Sampler
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 class SimpleCaptionDataset(Dataset):
@@ -48,10 +49,15 @@ class SimpleCaptionDataset(Dataset):
             self.target_resolutions = self._prepare_resolutions(raw_resolutions)
         else:
             self.target_resolutions = [(self.size, self.size)]
+        if self.bucket_config:
+            self.bucket_divisible = int(self.bucket_config.get("divisible_by", 8) or 8)
+        else:
+            self.bucket_divisible = 8
         self.latent_cache_cfg = latent_cache_config or {}
         self.latent_cache_enabled = bool(self.latent_cache_cfg.get("enabled", False))
         self.sample_target_sizes = []
         self.sample_buckets = []
+        self.original_sizes = []
         self._prepare_samples()
         self.latent_cache_active = False
         self.latent_cache_dir = None
@@ -110,22 +116,39 @@ class SimpleCaptionDataset(Dataset):
             return value
         return int(round(value / multiple) * multiple)
 
-    def _prepare_samples(self):
-        if not self.use_buckets:
-            for _ in self.files:
-                self.sample_target_sizes.append((self.size, self.size))
-                self.sample_buckets.append(self._bucket_key((self.size, self.size)))
-            return
+    def _compute_non_bucket_size(self, width, height):
+        target_max = int(self.size or 0)
+        w, h = width, height
+        if target_max > 0:
+            longest = max(width, height)
+            if longest > target_max:
+                scale = target_max / float(longest)
+                w = max(1, int(round(width * scale)))
+                h = max(1, int(round(height * scale)))
 
+        divisible = self.bucket_divisible if self.bucket_divisible > 0 else 8
+        if divisible > 1:
+            w = max(1, int(round(w / divisible)) * divisible)
+            h = max(1, int(round(h / divisible)) * divisible)
+        return (w, h)
+
+    def _prepare_samples(self):
         for path in self.files:
             try:
                 with Image.open(path) as img:
                     width, height = img.size
             except Exception:
                 width = height = self.size
-            bucket_size = self._choose_bucket(width, height)
-            self.sample_target_sizes.append(bucket_size)
-            self.sample_buckets.append(self._bucket_key(bucket_size))
+
+            self.original_sizes.append((width, height))
+
+            if self.use_buckets:
+                target_size = self._choose_bucket(width, height)
+            else:
+                target_size = self._compute_non_bucket_size(width, height)
+
+            self.sample_target_sizes.append(target_size)
+            self.sample_buckets.append(self._bucket_key(target_size))
 
     def _initialize_latent_cache_index(self):
         self.latent_paths = []
@@ -179,7 +202,9 @@ class SimpleCaptionDataset(Dataset):
     def load_image_tensor_for_cache(self, idx):
         img_path = self.files[idx]
         target_width, target_height = self.sample_target_sizes[idx]
-        return self._load_image_tensor(img_path, (target_width, target_height))
+        image = self._load_image_tensor(img_path)
+        image = self._resize_for_target(image, (target_width, target_height))
+        return image
 
     def activate_latent_cache(self):
         if not self.latent_cache_enabled:
@@ -207,14 +232,27 @@ class SimpleCaptionDataset(Dataset):
         w, h = size_tuple
         return f"{w}x{h}"
 
-    def _load_image_tensor(self, img_path: Path, target_size):
-        target_width, target_height = target_size
-        image = Image.open(img_path).convert("RGB")
-        image = image.resize((target_width, target_height), Image.BICUBIC)
-        image = np.array(image, dtype=np.float32) / 255.0
+    def _load_image_tensor(self, img_path: Path):
+        with Image.open(img_path) as img:
+            image = np.array(img.convert("RGB"), dtype=np.float32) / 255.0
         image = torch.from_numpy(image).permute(2, 0, 1).contiguous()
         image = (image * 2.0) - 1.0  # [-1, 1]
         return image
+
+    def _resize_for_target(self, image: torch.Tensor, target_size):
+        target_width, target_height = target_size
+        _, current_height, current_width = image.shape
+        if current_height == target_height and current_width == target_width:
+            return image
+        image = image.unsqueeze(0)
+        image = F.interpolate(
+            image,
+            size=(target_height, target_width),
+            mode="bilinear",
+            align_corners=False,
+        )
+        return image.squeeze(0).contiguous()
+
 
     def __getitem__(self, idx):
         img_path = self.files[idx]
@@ -245,8 +283,9 @@ class SimpleCaptionDataset(Dataset):
         if self.latent_cache_active:
             sample["latents"] = self._load_latent(idx)
         else:
-            image = self._load_image_tensor(img_path, (target_width, target_height))
-            sample["pixel_values"] = image
+            image = self._load_image_tensor(img_path)
+            image = self._resize_for_target(image, (target_width, target_height))
+            sample["pixel_values"] = image.half().contiguous()
 
         return sample
 
