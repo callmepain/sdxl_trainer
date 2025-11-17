@@ -31,6 +31,8 @@ DEFAULT_CONFIG = {
         "use_bf16": True,
         "use_gradient_checkpointing": True,
         "train_text_encoders": True,
+        "use_torch_compile": False,
+        "torch_compile_kwargs": {},
     },
     "training": {
         "output_dir": None,
@@ -275,6 +277,8 @@ use_ema = model_cfg["use_ema"]
 use_bf16 = model_cfg["use_bf16"]
 use_gradient_checkpointing = model_cfg["use_gradient_checkpointing"]
 train_text_encoders = bool(model_cfg.get("train_text_encoders", True))
+use_torch_compile = bool(model_cfg.get("use_torch_compile", False))
+torch_compile_kwargs = model_cfg.get("torch_compile_kwargs", {}) or {}
 log_every = training_cfg.get("log_every", 50)
 if log_every is not None:
     log_every = max(1, int(log_every))
@@ -313,6 +317,13 @@ unet = pipe.unet
 vae = pipe.vae
 te1 = pipe.text_encoder
 te2 = pipe.text_encoder_2
+
+if use_torch_compile:
+    compile_kwargs = dict(torch_compile_kwargs)
+    unet = torch.compile(unet, **compile_kwargs)
+    if train_text_encoders:
+        te1 = torch.compile(te1, **compile_kwargs)
+        te2 = torch.compile(te2, **compile_kwargs)
 
 if use_gradient_checkpointing:
     if hasattr(unet, "enable_gradient_checkpointing"):

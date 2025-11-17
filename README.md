@@ -23,6 +23,8 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `id`: Pfad oder HuggingFace-ID des Basis-SDXL-Modells
 - `use_ema`, `use_bf16`, `use_gradient_checkpointing`: Trainings-Optimierungen
 - `train_text_encoders`: `true/false`, ob CLIP/Text-Encoder weitertrainiert oder eingefroren werden sollen
+- `use_torch_compile`: aktiviert `torch.compile` (Inductor). Im Zweifel erst testen, manche Kombinationen funktionieren nicht stabil.
+- `torch_compile_kwargs`: optionale Dictionary-Parameter für `torch.compile` (z. B. `{ "mode": "max-autotune" }`)
 
 ### `run`
 - `name`: Klarer Name für den aktuellen Lauf (z. B. `new_beginning_v_0_0_4`)
