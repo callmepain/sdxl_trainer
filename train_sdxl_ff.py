@@ -178,6 +178,10 @@ try:
     from flash_attn import flash_attn_func
 except ImportError:
     flash_attn_func = None
+    warnings.warn(
+        "FlashAttention-3 wurde nicht gefunden. Verwende Standard-Attention – aktiviere die richtige venv oder installiere flash-attn>=3.",
+        stacklevel=2,
+    )
 
 
 class FlashAttnProcessor:

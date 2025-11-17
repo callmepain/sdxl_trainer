@@ -1,7 +1,6 @@
 {
   "_class_name": "StableDiffusionXLPipeline",
   "_diffusers_version": "0.35.2",
-  "_name_or_path": "new_beginning",
   "feature_extractor": [
     null,
     null
