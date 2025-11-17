@@ -873,8 +873,6 @@ accum_counter = 0
 last_loss_value = 0.0
 
 ema_start_step = lr_warmup_steps if use_ema else 0
-if use_ema:
-    print(f"EMA aktiviert (decay={ema_decay}, start_step={ema_start_step}, update_every={ema_update_every})")
 
 
 def optimizer_step_fn(loss_value, current_step, current_accum):
@@ -902,9 +900,6 @@ def optimizer_step_fn(loss_value, current_step, current_accum):
         if (current_step - ema_start_step) % ema_update_every == 0:
             ema_unet.step(unet.parameters())
             ema_updated = True
-
-    if current_step >= ema_start_step:
-        print(f"EMA update this step: {'yes' if ema_updated else 'no'}")
 
     current_step += 1
     display_loss = float(loss_value) if loss_value is not None else 0.0
