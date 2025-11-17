@@ -24,3 +24,4 @@ data/*
 
 # Lokale Config
 config.json
+AGENTS.md
