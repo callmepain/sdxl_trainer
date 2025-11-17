@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
     "model": {
         "id": "./new_beginning",
         "use_ema": True,
+        "ema_decay": 0.9999,
         "use_bf16": True,
         "use_gradient_checkpointing": True,
         "train_text_encoders": True,
@@ -392,6 +393,21 @@ if num_steps is None and num_epochs is None:
 lr_unet = training_cfg["lr_unet"]
 lr_te = training_cfg["lr_text_encoder"]
 use_ema = model_cfg["use_ema"]
+ema_decay_cfg = model_cfg.get("ema_decay", 0.9999)
+if ema_decay_cfg is None:
+    ema_decay = 0.9999
+else:
+    try:
+        ema_decay = float(ema_decay_cfg)
+    except (TypeError, ValueError):
+        warnings.warn(f"Ungültiger ema_decay-Wert ({ema_decay_cfg}), fallback zu 0.9999.", stacklevel=2)
+        ema_decay = 0.9999
+if not (0.0 < ema_decay < 1.0):
+    warnings.warn(
+        f"ema_decay muss zwischen 0 und 1 liegen (exklusive). Erhalte {ema_decay_cfg}, fallback zu 0.9999.",
+        stacklevel=2,
+    )
+    ema_decay = 0.9999
 use_bf16 = model_cfg["use_bf16"]
 use_gradient_checkpointing = model_cfg["use_gradient_checkpointing"]
 train_text_encoders = bool(model_cfg.get("train_text_encoders", True))
@@ -780,7 +796,7 @@ optimizer = bnb.optim.AdamW8bit(
 )
 
 # 6) EMA
-ema_unet = EMAModel(unet.parameters()) if use_ema else None
+ema_unet = EMAModel(unet.parameters(), decay=ema_decay) if use_ema else None
 
 lr_scheduler = None
 if lr_warmup_steps and lr_warmup_steps > 0:

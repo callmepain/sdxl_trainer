@@ -22,10 +22,11 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 
 ### `model`
 - `id`: Pfad oder HuggingFace-ID des Basis-SDXL-Modells
-- `use_ema`, `use_bf16`, `use_gradient_checkpointing`: Trainings-Optimierungen
+- `use_ema`, `ema_decay`, `use_bf16`, `use_gradient_checkpointing`: Trainings-Optimierungen
 - `train_text_encoders`: `true/false`, ob CLIP/Text-Encoder weitertrainiert oder eingefroren werden sollen
 - `use_torch_compile`: aktiviert `torch.compile` (Inductor). Im Zweifel erst testen, manche Kombinationen funktionieren nicht stabil.
 - `torch_compile_kwargs`: optionale Dictionary-Parameter für `torch.compile` (z. B. `{ "mode": "max-autotune" }`)
+- `ema_decay`: Glättungsfaktor für die EMA-Gewichte (zwischen 0 und 1, Standard 0.9999). Wird nur genutzt, wenn `use_ema=true`.
 
 ### `run`
 - `name`: Klarer Name für den aktuellen Lauf (z. B. `new_beginning_v_0_0_4`)
@@ -40,7 +41,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `lr_unet`, `lr_text_encoder`: Lernraten für UNet und beide Text-Encoder
 - `grad_accum_steps`, `batch_size`: Steuerung des effektiven Batchsizes
 - `noise_offset`: Stärke des Noise-Offsets (z. B. 0.1)
-- `min_sigma` & `min_sigma_warmup_steps`: Begrenzen sehr kleine Sigmas (z. B. 0.4 mit 500 Warmup-Schritten)
+- `min_sigma` & `min_sigma_warmup_steps`: Begrenzen sehr kleine Sigmas (z. B. 0.4 mit 500 Warmup-Schritten); Einsätze greifen erst nach dem Warmup und ändern niemals die Scheduler-Timesteps, sondern nur die Loss-Gewichtung.
 - `prediction_type`: z. B. `"v_prediction"` zum V-Pred-Fix, ansonsten `null` für Scheduler-Default
 - `snr_gamma`: aktiviert das Min-SNR-gewichtete Loss (z. B. 5.0–7.0) für stabilere Gradienten.
 - `max_grad_norm`: Gradient-Clipping pro Optimizer-Step (z. B. 1.0). `null` deaktiviert das Feature.
@@ -65,6 +66,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `caption_shuffle_prob`: Wahrscheinlichkeit, Teil-Captions neu zu mischen
 - `caption_shuffle_separator`: Trennzeichen zur Tokenisierung (Standard `","`)
 - `caption_shuffle_min_tokens`: Mindestanzahl Tokens, bevor Shuffle greift
+- Der Dataset-Loader erhält jedes Bild in Originalauflösung, wählt anhand des Seitenverhältnisses den besten Bucket und skaliert erst dann auf die Zielauflösung; ohne Buckets wird nur die längste Seite auf `size` begrenzt. Ausgelieferte Tensors liegen in `float16`, um RAM zu sparen.
 - `bucket`: Bucketed Training aktivieren (z. B. mehrere Auflösungen):
   ```json
   "bucket": {
@@ -89,7 +91,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
     "build_batch_size": 2
   }
   ```
-  Beim Start prüft das Skript, ob alle Latents vorhanden sind und erzeugt fehlende (per VAE) bevor das Training losläuft. Während des Trainings werden dann nur noch die `.safetensors`-Latents geladen – keine erneute VAE-Passage notwendig.
+  Beim Start prüft das Skript, ob alle Latents vorhanden sind und erzeugt fehlende (per VAE) bevor das Training losläuft. Latents werden in der jeweiligen Bucket-Auflösung (`H/8 × W/8`) abgelegt; während des Trainings werden dann nur noch die `.safetensors`-Latents geladen – keine erneute VAE-Passage notwendig.
 
 ### `optimizer`
 - AdamW (8-Bit via bitsandbytes); Parameter z. B. `weight_decay`, `betas`, `eps`
@@ -133,8 +135,8 @@ Während des Trainings:
 
 - Für kleine Tests `num_steps` deutlich reduzieren, `log_every`/`checkpoint_every` entsprechend setzen.
 - Caption-Augmentation lässt sich schnell testen, indem man z. B. `caption_dropout_prob` auf 0.1 und `caption_shuffle_prob` auf 0.2 stellt.
-- Noise-Offset (~0.1) + MinSigma (~0.4) helfen oft bei kontrastreichen Motiven.
-- Bei Trainingsabbrüchen durch toten FlashAttention-Fallback ggf. `flash_attn` entfernen oder PyTorch SDPA nutzen (passiert automatisch).
+- Noise-Offset (~0.1) + MinSigma (~0.4 mit ausreichendem Warmup) helfen oft bei kontrastreichen Motiven, ohne die Noise-Schedule zu zerstören.
+- Bei Trainingsabbrüchen durch toten FlashAttention-Fallback ggf. `flash_attn` entfernen oder PyTorch SDPA nutzen (passiert automatisch). Für GPUs ohne H100/Blackwell-Unterstützung empfiehlt sich FlashAttention 2.x oder der Standard-SDP-Pfad.
 
 Viel Erfolg beim Fine-Tuning! Bei Fragen oder Wunsch nach zusätzlichen Features einfach melden.
 
