@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 import bitsandbytes as bnb
 from torch.utils.data import DataLoader
-from diffusers import StableDiffusionXLPipeline, DDPMScheduler
+from diffusers import AutoencoderKL, StableDiffusionXLPipeline, DDPMScheduler
 from diffusers.training_utils import EMAModel
 from transformers import AutoTokenizer
 from tqdm.auto import tqdm
@@ -65,6 +65,12 @@ DEFAULT_CONFIG = {
             "divisible_by": 64,
             "batch_size": None,
             "drop_last": True,
+        },
+        "latent_cache": {
+            "enabled": False,
+            "cache_dir": "./cache/latents",
+            "dtype": "auto",
+            "build_batch_size": 1,
         },
     },
     "optimizer": {
@@ -311,60 +317,21 @@ else:
 
 dtype = torch.bfloat16 if use_bf16 else torch.float16
 
-# 1) Pipeline laden
-pipe = StableDiffusionXLPipeline.from_pretrained(
-    model_id,
-    torch_dtype=dtype,
-    use_safetensors=True,
-    #variant="fp16",
-)
-pipe.to(device)
-
-unet = pipe.unet
-vae = pipe.vae
-te1 = pipe.text_encoder
-te2 = pipe.text_encoder_2
-
-if use_torch_compile:
-    compile_kwargs = dict(torch_compile_kwargs)
-    unet = torch.compile(unet, **compile_kwargs)
-    if train_text_encoders:
-        te1 = torch.compile(te1, **compile_kwargs)
-        te2 = torch.compile(te2, **compile_kwargs)
-
-if use_gradient_checkpointing:
-    if hasattr(unet, "enable_gradient_checkpointing"):
-        unet.enable_gradient_checkpointing()
-    if train_text_encoders and hasattr(te1, "gradient_checkpointing_enable"):
-        te1.gradient_checkpointing_enable()
-    if train_text_encoders and hasattr(te2, "gradient_checkpointing_enable"):
-        te2.gradient_checkpointing_enable()
-
-# Nur VAE einfrieren (typisch für FF)
-for p in vae.parameters():
-    p.requires_grad_(False)
-
-unet.requires_grad_(True)
-te1.requires_grad_(train_text_encoders)
-te2.requires_grad_(train_text_encoders)
-
-# 2) FlashAttention-Processor (fällt sonst auf SDPA zurück)
-unet.set_attn_processor(FlashAttnProcessor())
-
-# 3) Tokenizer laden
+# 1) Tokenizer laden (ohne Pipeline)
 tokenizer_1 = AutoTokenizer.from_pretrained(
-    pipe.tokenizer.name_or_path, use_fast=False
+    model_id, subfolder="tokenizer", use_fast=False
 )
 tokenizer_2 = AutoTokenizer.from_pretrained(
-    pipe.tokenizer_2.name_or_path, use_fast=False
+    model_id, subfolder="tokenizer_2", use_fast=False
 )
 
-# 4) Dataset + Dataloader
+# 2) Dataset + Dataloader
 caption_dropout_prob = data_cfg.get("caption_dropout_prob", 0.0)
 caption_shuffle_prob = data_cfg.get("caption_shuffle_prob", 0.0)
 caption_shuffle_separator = data_cfg.get("caption_shuffle_separator", ",")
 caption_shuffle_min_tokens = data_cfg.get("caption_shuffle_min_tokens", 2)
 bucket_cfg = data_cfg.get("bucket", {})
+latent_cache_cfg = data_cfg.get("latent_cache", {})
 
 train_dataset = SimpleCaptionDataset(
     img_dir=data_cfg["image_dir"],
@@ -376,6 +343,7 @@ train_dataset = SimpleCaptionDataset(
     caption_shuffle_separator=caption_shuffle_separator,
     caption_shuffle_min_tokens=caption_shuffle_min_tokens,
     bucket_config=bucket_cfg,
+    latent_cache_config=latent_cache_cfg,
 )
 
 bucket_enabled = bool(bucket_cfg.get("enabled", False))
@@ -412,48 +380,6 @@ elif num_epochs is not None:
     total_progress_steps = steps_per_epoch * num_epochs
 else:
     total_progress_steps = None
-
-# 5) Noise-Scheduler (DDPM oder dein Favorit)
-noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
-if prediction_type_override:
-    noise_scheduler.register_to_config(prediction_type=prediction_type_override)
-prediction_type = noise_scheduler.config.prediction_type
-
-sigma_lookup = None
-if min_sigma is not None and min_sigma > 0:
-    alpha_cumprod = noise_scheduler.alphas_cumprod.clone().detach().to(device=device, dtype=torch.float32)
-    alpha_cumprod = torch.clamp(alpha_cumprod, min=1e-9)
-    sigma_lookup = torch.sqrt(torch.clamp((1 - alpha_cumprod) / alpha_cumprod, min=0.0))
-    sigma_lookup = torch.nan_to_num(
-        sigma_lookup,
-        nan=0.0,
-        posinf=torch.finfo(sigma_lookup.dtype).max,
-        neginf=0.0,
-    )
-
-# 6) Optimizer mit Param-Groups
-param_groups = [
-    {"params": unet.parameters(), "lr": lr_unet},
-]
-if train_text_encoders:
-    param_groups.extend(
-        [
-            {"params": te1.parameters(), "lr": lr_te},
-            {"params": te2.parameters(), "lr": lr_te},
-        ]
-    )
-
-optimizer = bnb.optim.AdamW8bit(
-    param_groups,
-    weight_decay=optimizer_cfg["weight_decay"],
-    betas=tuple(optimizer_cfg.get("betas", (0.9, 0.999))),
-    eps=optimizer_cfg.get("eps", 1e-8),
-)
-
-# 7) EMA
-ema_unet = EMAModel(unet.parameters()) if use_ema else None
-
-# 8) Hilfsfunktionen
 
 def encode_text(captions_batch):
     # Wir haben schon input_ids aus dem Dataset, daher hier just forward:
@@ -498,6 +424,153 @@ def prepare_latents(pixel_values, generator=None):
         posterior = vae.encode(pixel_values).latent_dist
         latents = posterior.sample(generator=generator) * 0.18215
     return latents
+
+
+def _resolve_cache_dtype(value, default_dtype):
+    if value is None:
+        return default_dtype
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in ("auto", "none", ""):
+            return default_dtype
+        if key in ("fp16", "float16", "half"):
+            return torch.float16
+        if key in ("bf16", "bfloat16"):
+            return torch.bfloat16
+        if key in ("fp32", "float32", "full"):
+            return torch.float32
+    if isinstance(value, torch.dtype):
+        return value
+    raise ValueError(f"Unbekannter Latent-Cache-Datentyp: {value}")
+
+
+def ensure_latent_cache(dataset, cache_cfg):
+    if not getattr(dataset, "latent_cache_enabled", False):
+        return
+
+    dataset.refresh_latent_cache_state()
+    missing = dataset.get_missing_latent_indices()
+    if not missing:
+        dataset.activate_latent_cache()
+        print("Latent-Cache: bestehende Dateien werden verwendet.")
+        return
+
+    build_batch_size = max(1, int(cache_cfg.get("build_batch_size", 1)))
+    cache_dtype = _resolve_cache_dtype(cache_cfg.get("dtype"), dtype)
+    total = len(missing)
+    print(f"Latent-Cache: Generiere {total} Einträge in {dataset.latent_cache_dir} ...")
+
+    vae_local = AutoencoderKL.from_pretrained(model_id, subfolder="vae", torch_dtype=dtype)
+    vae_local.to(device)
+    vae_local.eval()
+
+    @torch.no_grad()
+    def build_latents(pixel_batch):
+        posterior = vae_local.encode(pixel_batch).latent_dist
+        latents = posterior.sample() * 0.18215
+        return latents
+
+    for start in tqdm(range(0, total, build_batch_size), desc="Latent Cache", unit="img"):
+        batch_indices = missing[start : start + build_batch_size]
+        pixel_tensors = [
+            dataset.load_image_tensor_for_cache(idx) for idx in batch_indices
+        ]
+        pixel_batch = torch.stack(pixel_tensors).to(device=device, dtype=dtype)
+        latents_batch = build_latents(pixel_batch)
+        latents_batch = latents_batch.to(cache_dtype).cpu()
+        for idx, latent_tensor in zip(batch_indices, latents_batch):
+            dataset.save_latent(idx, latent_tensor)
+
+    vae_local.cpu()
+    del vae_local
+    torch.cuda.empty_cache()
+
+    dataset.refresh_latent_cache_state()
+    dataset.activate_latent_cache()
+    print("Latent-Cache aktiviert.")
+
+
+if latent_cache_cfg.get("enabled", False):
+    ensure_latent_cache(train_dataset, latent_cache_cfg)
+
+
+# 3) Pipeline laden
+pipe = StableDiffusionXLPipeline.from_pretrained(
+    model_id,
+    torch_dtype=dtype,
+    use_safetensors=True,
+)
+pipe.to(device)
+
+unet = pipe.unet
+vae = pipe.vae
+te1 = pipe.text_encoder
+te2 = pipe.text_encoder_2
+
+if use_torch_compile:
+    compile_kwargs = dict(torch_compile_kwargs)
+    unet = torch.compile(unet, **compile_kwargs)
+    if train_text_encoders:
+        te1 = torch.compile(te1, **compile_kwargs)
+        te2 = torch.compile(te2, **compile_kwargs)
+
+if use_gradient_checkpointing:
+    if hasattr(unet, "enable_gradient_checkpointing"):
+        unet.enable_gradient_checkpointing()
+    if train_text_encoders and hasattr(te1, "gradient_checkpointing_enable"):
+        te1.gradient_checkpointing_enable()
+    if train_text_encoders and hasattr(te2, "gradient_checkpointing_enable"):
+        te2.gradient_checkpointing_enable()
+
+for p in vae.parameters():
+    p.requires_grad_(False)
+
+unet.requires_grad_(True)
+te1.requires_grad_(train_text_encoders)
+te2.requires_grad_(train_text_encoders)
+
+unet.set_attn_processor(FlashAttnProcessor())
+
+
+# 4) Noise-Scheduler (DDPM oder dein Favorit)
+noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+if prediction_type_override:
+    noise_scheduler.register_to_config(prediction_type=prediction_type_override)
+prediction_type = noise_scheduler.config.prediction_type
+
+sigma_lookup = None
+if min_sigma is not None and min_sigma > 0:
+    alpha_cumprod = noise_scheduler.alphas_cumprod.clone().detach().to(device=device, dtype=torch.float32)
+    alpha_cumprod = torch.clamp(alpha_cumprod, min=1e-9)
+    sigma_lookup = torch.sqrt(torch.clamp((1 - alpha_cumprod) / alpha_cumprod, min=0.0))
+    sigma_lookup = torch.nan_to_num(
+        sigma_lookup,
+        nan=0.0,
+        posinf=torch.finfo(sigma_lookup.dtype).max,
+        neginf=0.0,
+    )
+
+# 5) Optimizer mit Param-Groups
+param_groups = [
+    {"params": unet.parameters(), "lr": lr_unet},
+]
+if train_text_encoders:
+    param_groups.extend(
+        [
+            {"params": te1.parameters(), "lr": lr_te},
+            {"params": te2.parameters(), "lr": lr_te},
+        ]
+    )
+
+optimizer = bnb.optim.AdamW8bit(
+    param_groups,
+    weight_decay=optimizer_cfg["weight_decay"],
+    betas=tuple(optimizer_cfg.get("betas", (0.9, 0.999))),
+    eps=optimizer_cfg.get("eps", 1e-8),
+)
+
+# 6) EMA
+ema_unet = EMAModel(unet.parameters()) if use_ema else None
 
 
 def build_min_sigma_enforcer(sigma_lookup_tensor, min_sigma_value, warmup_steps):
@@ -588,8 +661,12 @@ while True:
 
         with torch.amp.autocast("cuda", dtype=dtype, enabled=not use_bf16):
             # Images -> Latents
-            pixel_values = batch["pixel_values"]
-            latents = prepare_latents(pixel_values)
+            latents = batch.get("latents")
+            if latents is not None:
+                latents = latents.to(device=device, dtype=dtype)
+            else:
+                pixel_values = batch["pixel_values"]
+                latents = prepare_latents(pixel_values)
 
             # Noise + Timesteps
             noise = torch.randn_like(latents)

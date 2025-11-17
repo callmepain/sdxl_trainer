@@ -45,6 +45,12 @@
       "divisible_by": 64,
       "batch_size": null,
       "drop_last": true
+    },
+    "latent_cache": {
+      "enabled": false,
+      "cache_dir": "./cache/latents",
+      "dtype": "auto",
+      "build_batch_size": 1
     }
   },
   "optimizer": {

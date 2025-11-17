@@ -59,6 +59,16 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
   }
   ```
   Jede Auflösung bildet einen eigenen Bucket; der Dataloader gruppiert automatisch nur Bilder gleicher Auflösung in einen Batch und übergibt die passende `target_size`, sodass `add_time_ids` korrekt sind.
+- `latent_cache`: speichert vorab berechnete VAE-Latents auf Disk. Beispiel:
+  ```json
+  "latent_cache": {
+    "enabled": true,
+    "cache_dir": "./cache/latents",
+    "dtype": "auto",
+    "build_batch_size": 2
+  }
+  ```
+  Beim Start prüft das Skript, ob alle Latents vorhanden sind und erzeugt fehlende (per VAE) bevor das Training losläuft. Während des Trainings werden dann nur noch die `.safetensors`-Latents geladen – keine erneute VAE-Passage notwendig.
 
 ### `optimizer`
 - AdamW (8-Bit via bitsandbytes); Parameter z. B. `weight_decay`, `betas`, `eps`
