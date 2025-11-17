@@ -8,13 +8,14 @@ venv/
 
 # Outputs / Models / Logs
 sdxl_ff_out*/
-output/
+output*/
 new_beginning/
 logs/
 wandb/
 *.safetensors
 *.ckpt
 *.pt
+flash-attention/
 
 # Daten
 data/images/
