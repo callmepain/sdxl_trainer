@@ -60,9 +60,7 @@ DEFAULT_CONFIG = {
     "export": {
         "save_single_file": True,
         "checkpoint_path": "./sdxl_ff_out.safetensors",
-        "converter_script": None,
-        "converter_url": "https://raw.githubusercontent.com/huggingface/diffusers/main/scripts/convert_diffusers_to_original_stable_diffusion.py",
-        "force_download": False,
+        "converter_script": "./converttosdxl.py",
         "half_precision": True,
         "use_safetensors": True,
         "extra_args": [],
@@ -597,27 +595,6 @@ if ema_unet is not None:
 pipe.save_pretrained(output_dir)
 
 
-def _download_converter_script(target_path: Path, url: str, force: bool = False) -> Path:
-    if target_path.exists() and not force:
-        return target_path
-
-    try:
-        import requests
-    except ImportError as exc:
-        raise RuntimeError(
-            "Das Export-Feature benötigt das `requests`-Package. Bitte installiere es via `pip install requests`."
-        ) from exc
-
-    print(f"Lade Konverter-Skript von {url} ...")
-    response = requests.get(url, timeout=120)
-    if response.status_code >= 400:
-        raise RuntimeError(f"Konverter konnte nicht heruntergeladen werden ({response.status_code} {response.text[:120]}).")
-
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_bytes(response.content)
-    return target_path
-
-
 def _run_converter_script(script_path: Path, model_dir: Path, checkpoint_path: Path, cfg: dict) -> None:
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -656,19 +633,11 @@ def maybe_export_single_file(model_dir: Path, cfg: dict) -> None:
 
     checkpoint_path = Path(cfg.get("checkpoint_path", f"{model_dir}.safetensors")).resolve()
     converter_path = cfg.get("converter_script")
-    converter_url = cfg.get(
-        "converter_url",
-        "https://raw.githubusercontent.com/huggingface/diffusers/main/scripts/convert_diffusers_to_original_stable_diffusion.py",
-    )
-
-    if converter_path is not None:
-        converter_path = Path(converter_path).expanduser().resolve()
-        if not converter_path.exists():
-            raise FileNotFoundError(f"Angegebenes Konverter-Skript {converter_path} existiert nicht.")
-    else:
-        cache_dir = Path(cfg.get("cache_dir", ".sdxl_export")).expanduser().resolve()
-        converter_path = cache_dir / "convert_diffusers_to_original_stable_diffusion.py"
-        converter_path = _download_converter_script(converter_path, converter_url, cfg.get("force_download", False))
+    if not converter_path:
+        raise ValueError("`export.converter_script` ist nicht gesetzt. Bitte Pfad zum Konverter angeben.")
+    converter_path = Path(converter_path).expanduser().resolve()
+    if not converter_path.exists():
+        raise FileNotFoundError(f"Konverter-Skript {converter_path} existiert nicht.")
 
     _run_converter_script(converter_path, Path(model_dir).resolve(), checkpoint_path, cfg)
     print(f"Single-File-Checkpoint gespeichert unter: {checkpoint_path}")

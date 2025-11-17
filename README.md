@@ -45,7 +45,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 ### `export`
 - `save_single_file`: Schaltet die Erstellung einer `.safetensors`-Checkpointdatei ein/aus
 - `checkpoint_path`: Zielpfad
-- `converter_script`: Optionaler lokaler Pfad zum Diffusers-Konverter; andernfalls Autodownload über `converter_url`
+- `converter_script`: lokaler Pfad zum SDXL-Kompatibilitäts-Skript (`./converttosdxl.py`). Falls du ein anderes Skript einsetzen willst, hier dessen Pfad hinterlegen (Pflichtfeld).
 - `half_precision`, `use_safetensors`, `extra_args`: Feineinstellungen für den Konverter
 
 ## Training starten
