@@ -48,6 +48,17 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `caption_shuffle_prob`: Wahrscheinlichkeit, Teil-Captions neu zu mischen
 - `caption_shuffle_separator`: Trennzeichen zur Tokenisierung (Standard `","`)
 - `caption_shuffle_min_tokens`: Mindestanzahl Tokens, bevor Shuffle greift
+- `bucket`: Bucketed Training aktivieren (z. B. mehrere Auflösungen):
+  ```json
+  "bucket": {
+    "enabled": true,
+    "resolutions": [[1024,1024],[896,1152],[1152,896]],
+    "divisible_by": 64,
+    "batch_size": 2,
+    "drop_last": true
+  }
+  ```
+  Jede Auflösung bildet einen eigenen Bucket; der Dataloader gruppiert automatisch nur Bilder gleicher Auflösung in einen Batch und übergibt die passende `target_size`, sodass `add_time_ids` korrekt sind.
 
 ### `optimizer`
 - AdamW (8-Bit via bitsandbytes); Parameter z. B. `weight_decay`, `betas`, `eps`

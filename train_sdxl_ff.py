@@ -13,7 +13,7 @@ from diffusers import StableDiffusionXLPipeline, DDPMScheduler
 from diffusers.training_utils import EMAModel
 from transformers import AutoTokenizer
 from tqdm.auto import tqdm
-from dataset import SimpleCaptionDataset
+from dataset import BucketBatchSampler, SimpleCaptionDataset
 
 
 CONFIG_PATH = Path("config.json")
@@ -59,6 +59,13 @@ DEFAULT_CONFIG = {
         "caption_shuffle_prob": 0.0,
         "caption_shuffle_separator": ",",
         "caption_shuffle_min_tokens": 2,
+        "bucket": {
+            "enabled": False,
+            "resolutions": [],
+            "divisible_by": 64,
+            "batch_size": None,
+            "drop_last": True,
+        },
     },
     "optimizer": {
         "weight_decay": 0.01,
@@ -357,6 +364,7 @@ caption_dropout_prob = data_cfg.get("caption_dropout_prob", 0.0)
 caption_shuffle_prob = data_cfg.get("caption_shuffle_prob", 0.0)
 caption_shuffle_separator = data_cfg.get("caption_shuffle_separator", ",")
 caption_shuffle_min_tokens = data_cfg.get("caption_shuffle_min_tokens", 2)
+bucket_cfg = data_cfg.get("bucket", {})
 
 train_dataset = SimpleCaptionDataset(
     img_dir=data_cfg["image_dir"],
@@ -367,15 +375,32 @@ train_dataset = SimpleCaptionDataset(
     caption_shuffle_prob=caption_shuffle_prob,
     caption_shuffle_separator=caption_shuffle_separator,
     caption_shuffle_min_tokens=caption_shuffle_min_tokens,
+    bucket_config=bucket_cfg,
 )
 
-train_loader = DataLoader(
-    train_dataset,
-    batch_size=batch_size,
-    shuffle=data_cfg.get("shuffle", True),
-    num_workers=data_cfg.get("num_workers", 4),
-    pin_memory=data_cfg.get("pin_memory", True),
-)
+bucket_enabled = bool(bucket_cfg.get("enabled", False))
+if bucket_enabled:
+    bucket_batch_size = int(bucket_cfg.get("batch_size") or batch_size)
+    bucket_sampler = BucketBatchSampler(
+        train_dataset.sample_buckets,
+        batch_size=bucket_batch_size,
+        shuffle=data_cfg.get("shuffle", True),
+        drop_last=bucket_cfg.get("drop_last", True),
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_sampler=bucket_sampler,
+        num_workers=data_cfg.get("num_workers", 4),
+        pin_memory=data_cfg.get("pin_memory", True),
+    )
+else:
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=data_cfg.get("shuffle", True),
+        num_workers=data_cfg.get("num_workers", 4),
+        pin_memory=data_cfg.get("pin_memory", True),
+    )
 
 if len(train_loader) == 0:
     raise ValueError("Trainings-Dataloader ist leer. Bitte überprüfe den Dataset-Pfad oder den Inhalt.")
@@ -589,18 +614,24 @@ while True:
             prompt_embeds, pooled_embeds = encode_text(batch)
 
             # UNet-Forward
-            add_time_ids = torch.tensor(
-                [
+            target_sizes = batch.get("target_size")
+            if target_sizes is not None:
+                target_sizes = target_sizes.to(device=device)
+                heights = target_sizes[:, 0].to(pooled_embeds.dtype)
+                widths = target_sizes[:, 1].to(pooled_embeds.dtype)
+            else:
+                widths = torch.full(
+                    (latents.shape[0],),
                     data_cfg["size"],
-                    data_cfg["size"],
-                    0,
-                    0,
-                    data_cfg["size"],
-                    data_cfg["size"],
-                ],
-                device=device,
-                dtype=pooled_embeds.dtype,
-            ).repeat(latents.shape[0], 1)
+                    device=device,
+                    dtype=pooled_embeds.dtype,
+                )
+                heights = widths
+            zeros = torch.zeros_like(widths)
+            add_time_ids = torch.stack(
+                [widths, heights, zeros, zeros, widths, heights],
+                dim=1,
+            )
 
             model_pred = unet(
                 noisy_latents,
