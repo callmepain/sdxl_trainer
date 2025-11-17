@@ -27,7 +27,11 @@
     "noise_offset": 0.0,
     "min_sigma": null,
     "min_sigma_warmup_steps": 0,
-    "prediction_type": null
+    "prediction_type": null,
+    "snr_gamma": null,
+    "max_grad_norm": null,
+    "detect_anomaly": true,
+    "lr_warmup_steps": 0
   },
   "data": {
     "image_dir": "./data/images",
@@ -44,7 +48,8 @@
       "resolutions": [],
       "divisible_by": 64,
       "batch_size": null,
-      "drop_last": true
+      "drop_last": true,
+      "per_resolution_batch_sizes": {}
     },
     "latent_cache": {
       "enabled": false,

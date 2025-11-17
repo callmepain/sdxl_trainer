@@ -41,6 +41,10 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `noise_offset`: Stärke des Noise-Offsets (z. B. 0.1)
 - `min_sigma` & `min_sigma_warmup_steps`: Begrenzen sehr kleine Sigmas (z. B. 0.4 mit 500 Warmup-Schritten)
 - `prediction_type`: z. B. `"v_prediction"` zum V-Pred-Fix, ansonsten `null` für Scheduler-Default
+- `snr_gamma`: aktiviert das Min-SNR-gewichtete Loss (z. B. 5.0–7.0) für stabilere Gradienten.
+- `max_grad_norm`: Gradient-Clipping pro Optimizer-Step (z. B. 1.0). `null` deaktiviert das Feature.
+- `detect_anomaly`: bricht das Training ab, sobald NaN/Inf im Loss auftauchen.
+- `lr_warmup_steps`: Lineares Warmup der Lernrate über die ersten N Optimizer-Schritte (typisch 100–500).
 
 ### `data`
 - `image_dir`: Ordner mit Bildern (PNG/JPG/WebP)
@@ -55,10 +59,14 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
     "resolutions": [[1024,1024],[896,1152],[1152,896]],
     "divisible_by": 64,
     "batch_size": 2,
-    "drop_last": true
+    "drop_last": true,
+    "per_resolution_batch_sizes": {
+      "832x1216": 2,
+      "1216x832": 2
+    }
   }
   ```
-  Jede Auflösung bildet einen eigenen Bucket; der Dataloader gruppiert automatisch nur Bilder gleicher Auflösung in einen Batch und übergibt die passende `target_size`, sodass `add_time_ids` korrekt sind.
+  Jede Auflösung bildet einen eigenen Bucket; der Dataloader gruppiert automatisch nur Bilder gleicher Auflösung in einen Batch, nutzt optional eine pro-Bucket-Batchsize und loggt beim Start die komplette Verteilung inkl. effektiver Batchgrößen.
 - `latent_cache`: speichert vorab berechnete VAE-Latents auf Disk. Beispiel:
   ```json
   "latent_cache": {
@@ -78,6 +86,12 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `checkpoint_path`: Zielpfad. Kann leer bleiben, wenn `run.name` gesetzt ist.
 - `converter_script`: lokaler Pfad zum SDXL-Kompatibilitäts-Skript (`./converttosdxl.py`). Falls du ein anderes Skript einsetzen willst, hier dessen Pfad hinterlegen (Pflichtfeld).
 - `half_precision`, `use_safetensors`, `extra_args`: Feineinstellungen für den Konverter
+
+### Stabilität & Monitoring
+- Min-SNR-gewichtetet Loss (`training.snr_gamma`) reduziert den Einfluss von extrem verrauschten Schritten.
+- `training.max_grad_norm` aktiviert Gradient-Clipping (z. B. 1.0), `training.detect_anomaly` bricht bei NaN/Inf sofort ab.
+- `training.lr_warmup_steps` erlaubt lineares Warmup der Lernrate (empfohlen 100–500 Schritte).
+- Beim Start werden – sofern Buckets aktiv sind – die tatsächlichen Bucket-Verteilungen inklusive effektiver Batchgrößen geloggt.
 
 ## Training starten
 

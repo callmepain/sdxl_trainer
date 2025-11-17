@@ -4,10 +4,13 @@ import copy
 import math
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import torch
 import bitsandbytes as bnb
+from torch.nn.utils import clip_grad_norm_
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from diffusers import AutoencoderKL, StableDiffusionXLPipeline, DDPMScheduler
 from diffusers.training_utils import EMAModel
@@ -48,6 +51,10 @@ DEFAULT_CONFIG = {
         "min_sigma": 0.4,
         "min_sigma_warmup_steps": 20,
         "prediction_type": "v_prediction",
+        "snr_gamma": None,
+        "max_grad_norm": None,
+        "detect_anomaly": True,
+        "lr_warmup_steps": 0,
     },
     "data": {
         "image_dir": "./data/images",
@@ -65,6 +72,7 @@ DEFAULT_CONFIG = {
             "divisible_by": 64,
             "batch_size": None,
             "drop_last": True,
+            "per_resolution_batch_sizes": {},
         },
         "latent_cache": {
             "enabled": False,
@@ -87,6 +95,33 @@ DEFAULT_CONFIG = {
         "extra_args": [],
     },
 }
+
+
+def _normalize_bucket_key(value):
+    if isinstance(value, str):
+        token = value.strip().lower().replace(" ", "")
+        if "x" in token:
+            parts = token.split("x")
+            if len(parts) == 2 and all(part.isdigit() for part in parts):
+                return f"{int(parts[0])}x{int(parts[1])}"
+        return token
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        try:
+            return f"{int(value[0])}x{int(value[1])}"
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _bucket_sort_key(value: str):
+    try:
+        cleaned = value.strip().lower().replace(" ", "")
+        if "x" in cleaned:
+            w, h = cleaned.split("x")
+            return int(w), int(h)
+    except Exception:
+        pass
+    return (float("inf"), value)
 
 
 def _deep_update(base: dict, updates: dict) -> dict:
@@ -305,6 +340,14 @@ if min_sigma is not None:
     min_sigma = float(min_sigma)
 min_sigma_warmup_steps = max(0, int(training_cfg.get("min_sigma_warmup_steps", 0)))
 prediction_type_override = training_cfg.get("prediction_type")
+snr_gamma = training_cfg.get("snr_gamma")
+if snr_gamma is not None:
+    snr_gamma = float(snr_gamma)
+max_grad_norm = training_cfg.get("max_grad_norm")
+if max_grad_norm is not None:
+    max_grad_norm = float(max_grad_norm)
+detect_anomaly = bool(training_cfg.get("detect_anomaly", True))
+lr_warmup_steps = int(training_cfg.get("lr_warmup_steps", 0) or 0)
 
 checkpoint_path_cfg = export_cfg.get("checkpoint_path")
 if checkpoint_path_cfg:
@@ -332,6 +375,17 @@ caption_shuffle_separator = data_cfg.get("caption_shuffle_separator", ",")
 caption_shuffle_min_tokens = data_cfg.get("caption_shuffle_min_tokens", 2)
 bucket_cfg = data_cfg.get("bucket", {})
 latent_cache_cfg = data_cfg.get("latent_cache", {})
+per_bucket_cfg = bucket_cfg.get("per_resolution_batch_sizes") or {}
+bucket_batch_size_map = {}
+if isinstance(per_bucket_cfg, dict):
+    for raw_key, raw_value in per_bucket_cfg.items():
+        normalized = _normalize_bucket_key(raw_key)
+        if not normalized:
+            continue
+        try:
+            bucket_batch_size_map[normalized] = max(1, int(raw_value))
+        except (TypeError, ValueError):
+            continue
 
 train_dataset = SimpleCaptionDataset(
     img_dir=data_cfg["image_dir"],
@@ -348,12 +402,21 @@ train_dataset = SimpleCaptionDataset(
 
 bucket_enabled = bool(bucket_cfg.get("enabled", False))
 if bucket_enabled:
-    bucket_batch_size = int(bucket_cfg.get("batch_size") or batch_size)
+    bucket_default_batch_size = int(bucket_cfg.get("batch_size") or batch_size)
+    bucket_counts = Counter(train_dataset.sample_buckets)
+    if bucket_counts:
+        print("Bucket-Verteilung:")
+        for key in sorted(bucket_counts.keys(), key=_bucket_sort_key):
+            normalized_key = _normalize_bucket_key(key) or key
+            effective_size = bucket_batch_size_map.get(normalized_key, bucket_default_batch_size)
+            print(f"  {key}: {bucket_counts[key]} samples (batch_size={effective_size})")
+
     bucket_sampler = BucketBatchSampler(
         train_dataset.sample_buckets,
-        batch_size=bucket_batch_size,
+        batch_size=bucket_default_batch_size,
         shuffle=data_cfg.get("shuffle", True),
         drop_last=bucket_cfg.get("drop_last", True),
+        per_bucket_batch_sizes=bucket_batch_size_map,
     )
     train_loader = DataLoader(
         train_dataset,
@@ -470,16 +533,30 @@ def ensure_latent_cache(dataset, cache_cfg):
         latents = posterior.sample() * 0.18215
         return latents
 
-    for start in tqdm(range(0, total, build_batch_size), desc="Latent Cache", unit="img"):
-        batch_indices = missing[start : start + build_batch_size]
-        pixel_tensors = [
-            dataset.load_image_tensor_for_cache(idx) for idx in batch_indices
-        ]
-        pixel_batch = torch.stack(pixel_tensors).to(device=device, dtype=dtype)
-        latents_batch = build_latents(pixel_batch)
-        latents_batch = latents_batch.to(cache_dtype).cpu()
-        for idx, latent_tensor in zip(batch_indices, latents_batch):
-            dataset.save_latent(idx, latent_tensor)
+    bucket_groups = {}
+    sample_buckets = getattr(dataset, "sample_buckets", None)
+    for idx in missing:
+        bucket_key = None
+        if sample_buckets is not None and idx < len(sample_buckets):
+            bucket_key = sample_buckets[idx]
+        bucket_groups.setdefault(bucket_key, []).append(idx)
+
+    progress_bar = tqdm(total=total, desc="Latent Cache", unit="img")
+    try:
+        for bucket_key, idx_list in bucket_groups.items():
+            for start in range(0, len(idx_list), build_batch_size):
+                batch_indices = idx_list[start : start + build_batch_size]
+                pixel_tensors = [
+                    dataset.load_image_tensor_for_cache(idx) for idx in batch_indices
+                ]
+                pixel_batch = torch.stack(pixel_tensors).to(device=device, dtype=dtype)
+                latents_batch = build_latents(pixel_batch)
+                latents_batch = latents_batch.to(cache_dtype).cpu()
+                for idx, latent_tensor in zip(batch_indices, latents_batch):
+                    dataset.save_latent(idx, latent_tensor)
+                progress_bar.update(len(batch_indices))
+    finally:
+        progress_bar.close()
 
     vae_local.cpu()
     del vae_local
@@ -538,11 +615,12 @@ if prediction_type_override:
     noise_scheduler.register_to_config(prediction_type=prediction_type_override)
 prediction_type = noise_scheduler.config.prediction_type
 
+alphas_cumprod_tensor = noise_scheduler.alphas_cumprod.to(device=device)
+
 sigma_lookup = None
 if min_sigma is not None and min_sigma > 0:
-    alpha_cumprod = noise_scheduler.alphas_cumprod.clone().detach().to(device=device, dtype=torch.float32)
-    alpha_cumprod = torch.clamp(alpha_cumprod, min=1e-9)
-    sigma_lookup = torch.sqrt(torch.clamp((1 - alpha_cumprod) / alpha_cumprod, min=0.0))
+    alpha_vals = torch.clamp(alphas_cumprod_tensor.to(torch.float32), min=1e-9, max=1.0).clone()
+    sigma_lookup = torch.sqrt(torch.clamp((1 - alpha_vals) / alpha_vals, min=0.0))
     sigma_lookup = torch.nan_to_num(
         sigma_lookup,
         nan=0.0,
@@ -572,6 +650,14 @@ optimizer = bnb.optim.AdamW8bit(
 # 6) EMA
 ema_unet = EMAModel(unet.parameters()) if use_ema else None
 
+lr_scheduler = None
+if lr_warmup_steps and lr_warmup_steps > 0:
+    def _lr_warmup_lambda(step: int):
+        if step >= lr_warmup_steps:
+            return 1.0
+        return max((step + 1) / float(lr_warmup_steps), 1e-8)
+
+    lr_scheduler = LambdaLR(optimizer, lr_lambda=_lr_warmup_lambda)
 
 def build_min_sigma_enforcer(sigma_lookup_tensor, min_sigma_value, warmup_steps):
     if sigma_lookup_tensor is None or min_sigma_value is None or min_sigma_value <= 0:
@@ -622,8 +708,17 @@ accum_counter = 0
 last_loss_value = 0.0
 
 def optimizer_step_fn(loss_value, current_step, current_accum):
+    if max_grad_norm and max_grad_norm > 0:
+        scaler.unscale_(optimizer)
+        params_to_clip = [p for group in optimizer.param_groups for p in group["params"] if p.grad is not None]
+        if params_to_clip:
+            clip_grad_norm_(params_to_clip, max_norm=max_grad_norm)
+
     scaler.step(optimizer)
     scaler.update()
+    if lr_scheduler is not None:
+        lr_scheduler.step()
+
     optimizer.zero_grad(set_to_none=True)
     current_accum = 0
 
@@ -717,14 +812,30 @@ while True:
                 added_cond_kwargs={"text_embeds": pooled_embeds, "time_ids": add_time_ids},
             ).sample
 
-            # Standard MSE in noise-space
             if prediction_type == "v_prediction":
                 target = noise_scheduler.get_velocity(latents, noise, timesteps)
             elif prediction_type == "sample":
                 target = latents
             else:
                 target = noise
-            raw_loss = torch.nn.functional.mse_loss(model_pred, target, reduction="mean")
+
+            loss_dims = tuple(range(1, model_pred.ndim))
+            per_example_loss = torch.mean((model_pred.float() - target.float()) ** 2, dim=loss_dims)
+
+            if snr_gamma is not None and prediction_type in ("epsilon", "v_prediction"):
+                alphas_now = alphas_cumprod_tensor.index_select(0, timesteps).to(per_example_loss.dtype)
+                snr_vals = alphas_now / torch.clamp(1 - alphas_now, min=1e-8)
+                gamma_tensor = torch.full_like(snr_vals, snr_gamma)
+                snr_weights = torch.minimum(snr_vals, gamma_tensor) / torch.clamp(snr_vals, min=1e-8)
+                per_example_loss = per_example_loss * snr_weights
+
+            raw_loss = per_example_loss.mean()
+
+            if detect_anomaly and not torch.isfinite(raw_loss):
+                raise FloatingPointError(
+                    f"Non-finite loss detected at global_step={global_step}, timestep_mean={timesteps.float().mean().item():.2f}"
+                )
+
             loss = raw_loss / grad_accum_steps
 
         last_loss_value = raw_loss.item()

@@ -48,11 +48,11 @@ class SimpleCaptionDataset(Dataset):
             self.target_resolutions = self._prepare_resolutions(raw_resolutions)
         else:
             self.target_resolutions = [(self.size, self.size)]
+        self.latent_cache_cfg = latent_cache_config or {}
+        self.latent_cache_enabled = bool(self.latent_cache_cfg.get("enabled", False))
         self.sample_target_sizes = []
         self.sample_buckets = []
         self._prepare_samples()
-        self.latent_cache_cfg = latent_cache_config or {}
-        self.latent_cache_enabled = bool(self.latent_cache_cfg.get("enabled", False))
         self.latent_cache_active = False
         self.latent_cache_dir = None
         self.latent_paths = []
@@ -126,8 +126,6 @@ class SimpleCaptionDataset(Dataset):
             bucket_size = self._choose_bucket(width, height)
             self.sample_target_sizes.append(bucket_size)
             self.sample_buckets.append(self._bucket_key(bucket_size))
-        if self.latent_cache_enabled:
-            self._initialize_latent_cache_index()
 
     def _initialize_latent_cache_index(self):
         self.latent_paths = []
@@ -260,48 +258,55 @@ class BucketBatchSampler(Sampler):
         batch_size,
         shuffle=True,
         drop_last=True,
+        per_bucket_batch_sizes=None,
     ):
         self.bucket_ids = list(bucket_ids)
-        self.batch_size = int(batch_size)
-        self.shuffle = shuffle
-        self.drop_last = drop_last
-        if self.batch_size <= 0:
-            raise ValueError("`batch_size` must be positive for BucketBatchSampler.")
+        self.default_batch_size = max(1, int(batch_size))
+        self.shuffle = bool(shuffle)
+        self.drop_last = bool(drop_last)
+        self.per_bucket_batch_sizes = {}
+        if per_bucket_batch_sizes:
+            for key, value in per_bucket_batch_sizes.items():
+                try:
+                    size_val = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if size_val > 0:
+                    self.per_bucket_batch_sizes[str(key)] = size_val
+
+    def _bucket_size(self, bucket_key):
+        return self.per_bucket_batch_sizes.get(bucket_key, self.default_batch_size)
 
     def __iter__(self):
         bucket_to_indices = defaultdict(list)
         for idx, bucket in enumerate(self.bucket_ids):
             bucket_to_indices[bucket].append(idx)
 
-        batches = []
-        bucket_keys = list(bucket_to_indices.keys())
+        bucket_items = list(bucket_to_indices.items())
         if self.shuffle:
-            random.shuffle(bucket_keys)
+            random.shuffle(bucket_items)
 
-        for bucket_key in bucket_keys:
-            indices = bucket_to_indices[bucket_key]
+        for bucket_key, indices in bucket_items:
+            batch_size = self._bucket_size(bucket_key)
+            if batch_size <= 0:
+                continue
             if self.shuffle:
                 random.shuffle(indices)
-            full_chunks = len(indices) // self.batch_size
-            for i in range(full_chunks):
-                batch = indices[i * self.batch_size : (i + 1) * self.batch_size]
-                batches.append(batch)
-            remainder = len(indices) % self.batch_size
-            if not self.drop_last and remainder:
-                batches.append(indices[-remainder:])
-
-        if self.shuffle:
-            random.shuffle(batches)
-
-        for batch in batches:
-            yield batch
+            for start in range(0, len(indices), batch_size):
+                batch_indices = indices[start : start + batch_size]
+                if len(batch_indices) < batch_size and self.drop_last:
+                    continue
+                yield batch_indices
 
     def __len__(self):
         counter = Counter(self.bucket_ids)
         total = 0
-        for count in counter.values():
-            full = count // self.batch_size
+        for bucket_key, count in counter.items():
+            batch_size = self._bucket_size(bucket_key)
+            if batch_size <= 0:
+                continue
+            full = count // batch_size
             total += full
-            if not self.drop_last and (count % self.batch_size):
+            if not self.drop_last and (count % batch_size):
                 total += 1
         return total
