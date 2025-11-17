@@ -8,7 +8,7 @@ venv/
 
 # Outputs / Models / Logs
 sdxl_ff_out*/
-output*/
+.output*/
 cache*/
 new_beginning/
 logs/
