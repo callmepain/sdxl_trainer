@@ -51,7 +51,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `ema_update_every`: Wie oft (in Steps) die EMA nach `lr_warmup_steps` aktualisiert wird; Standard 10. Davor bleibt EMA inaktiv.
 - `resume_from`: Pfad zu einem bestehenden Diffusers-Output, dessen Gewichte weitertrainiert werden sollen.
 - `resume_state_path`: Optionaler Pfad zu einer gespeicherten Trainer-State-Datei (`trainer_state.pt`). Wenn nicht gesetzt, wird bei `resume_from` automatisch `<resume_from>/trainer_state.pt` verwendet.
-- `state_path`: Zielpfad für den Trainer-State des aktuellen Laufs (Standard: `<output_dir>/trainer_state.pt`). Enthält Optimizer-, Scaler- und EMA-Status.
+- `state_path`: Zielpfad für den Trainer-State des aktuellen Laufs (Standard: `<output_dir>/trainer_state.pt`). Enthält Optimizer-, Scaler-, EMA- und LR-Scheduler-Status.
 - `tensorboard`: Block zur Aktivierung des TensorBoard-Loggings, z. B.:
   ```json
   "tensorboard": {

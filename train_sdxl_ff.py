@@ -9,6 +9,16 @@ from pathlib import Path
 
 import torch
 import bitsandbytes as bnb
+warnings.filterwarnings(
+    "ignore",
+    message=".*cuda capability.*",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message="Skipping import of cpp extensions due to incompatible torch version.*",
+    category=UserWarning,
+)
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
@@ -412,12 +422,14 @@ else:
 resume_state_dict = None
 resume_global_step = 0
 resume_epoch = 0
+resume_lr_scheduler_state = None
 resume_state_active = bool(resume_from_path is not None or resume_state_path_cfg is not None)
 if resume_state_active and resume_state_path is not None and resume_state_path.exists():
     try:
         resume_state_dict = torch.load(resume_state_path, map_location="cpu")
         resume_global_step = int(resume_state_dict.get("global_step", 0) or 0)
         resume_epoch = int(resume_state_dict.get("epoch", 0) or 0)
+        resume_lr_scheduler_state = resume_state_dict.get("lr_scheduler")
         print(
             f"Trainer-State geladen aus {resume_state_path} "
             f"(step={resume_global_step}, epoch={resume_epoch})"
@@ -791,7 +803,33 @@ if latent_cache_cfg.get("enabled", False):
     ensure_latent_cache(train_dataset, latent_cache_cfg)
 
 
-def save_training_state(state_path: Path, optimizer, scaler, ema_model, global_step: int, epoch: int) -> None:
+def _move_ema_to_device(ema_model, device):
+    if ema_model is None:
+        return
+    tensor_lists = [
+        getattr(ema_model, "shadow_params", None),
+        getattr(ema_model, "ema_params", None),
+        getattr(ema_model, "reference_params", None),
+    ]
+    for tensor_list in tensor_lists:
+        if tensor_list is None:
+            continue
+        for tensor in tensor_list:
+            if tensor is None:
+                continue
+            tensor.data = tensor.data.to(device)
+    if hasattr(ema_model, "device"):
+        ema_model.device = device
+
+def save_training_state(
+    state_path: Path,
+    optimizer,
+    scaler,
+    ema_model,
+    lr_scheduler,
+    global_step: int,
+    epoch: int,
+) -> None:
     state_path = state_path.expanduser()
     state_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -802,6 +840,8 @@ def save_training_state(state_path: Path, optimizer, scaler, ema_model, global_s
     }
     if ema_model is not None:
         payload["ema"] = ema_model.state_dict()
+    if lr_scheduler is not None:
+        payload["lr_scheduler"] = lr_scheduler.state_dict()
     torch.save(payload, state_path)
 
 
@@ -891,6 +931,8 @@ optimizer = bnb.optim.AdamW8bit(
 
 # 6) EMA
 ema_unet = EMAModel(unet.parameters(), decay=ema_decay) if use_ema else None
+if ema_unet is not None:
+    _move_ema_to_device(ema_unet, device)
 if resume_state_dict is not None:
     opt_state = resume_state_dict.get("optimizer")
     if opt_state is not None:
@@ -902,6 +944,7 @@ if resume_state_dict is not None:
     if ema_state is not None and ema_unet is not None:
         try:
             ema_unet.load_state_dict(ema_state)
+            _move_ema_to_device(ema_unet, device)
         except Exception as exc:
             warnings.warn(f"EMA-Status konnte nicht geladen werden ({exc}).", stacklevel=2)
 
@@ -913,6 +956,11 @@ if lr_warmup_steps and lr_warmup_steps > 0:
         return max((step + 1) / float(lr_warmup_steps), 1e-8)
 
     lr_scheduler = LambdaLR(optimizer, lr_lambda=_lr_warmup_lambda)
+if lr_scheduler is not None and resume_lr_scheduler_state is not None:
+    try:
+        lr_scheduler.load_state_dict(resume_lr_scheduler_state)
+    except Exception as exc:
+        warnings.warn(f"LR-Scheduler-Status konnte nicht geladen werden ({exc}).", stacklevel=2)
 
 class MinSigmaController:
     def __init__(self, sigma_lookup_tensor, min_sigma_value, warmup_steps):
@@ -1046,7 +1094,7 @@ def optimizer_step_fn(loss_value, current_step, current_accum):
             ema_unet.copy_to(unet.parameters())
 
         pipe.save_pretrained(f"{output_dir}_step_{current_step}")
-        save_training_state(state_save_path, optimizer, scaler, ema_unet, current_step, epoch)
+        save_training_state(state_save_path, optimizer, scaler, ema_unet, lr_scheduler, current_step, epoch)
 
         if ema_unet is not None:
             ema_unet.restore(unet.parameters())
@@ -1184,7 +1232,7 @@ if ema_unet is not None:
     ema_unet.copy_to(unet.parameters())
 
 pipe.save_pretrained(output_dir)
-save_training_state(state_save_path, optimizer, scaler, ema_unet, global_step, epoch)
+save_training_state(state_save_path, optimizer, scaler, ema_unet, lr_scheduler, global_step, epoch)
 
 if tb_writer is not None:
     tb_writer.flush()
