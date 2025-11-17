@@ -387,6 +387,18 @@ if isinstance(per_bucket_cfg, dict):
         except (TypeError, ValueError):
             continue
 
+bucket_enabled = bool(bucket_cfg.get("enabled", False))
+bucket_default_batch_size = int(bucket_cfg.get("batch_size") or batch_size) if bucket_enabled else batch_size
+effective_batch = bucket_default_batch_size * grad_accum_steps
+print("==== Trainingskonfiguration ====")
+print(f"Modell-ID: {model_id}")
+print(f"Konfiguriertes Batch-Size-Basismaß: {bucket_default_batch_size}{' (Bucket-Default)' if bucket_enabled else ''}")
+if bucket_batch_size_map:
+    print(f"Bucket-spezifische Batchsizes: {bucket_batch_size_map}")
+print(f"Gradient Accumulation Steps: {grad_accum_steps}")
+print(f"Effektive Batchsize (pro Step): {effective_batch}")
+print("================================")
+
 train_dataset = SimpleCaptionDataset(
     img_dir=data_cfg["image_dir"],
     tokenizer_1=tokenizer_1,
@@ -400,9 +412,7 @@ train_dataset = SimpleCaptionDataset(
     latent_cache_config=latent_cache_cfg,
 )
 
-bucket_enabled = bool(bucket_cfg.get("enabled", False))
 if bucket_enabled:
-    bucket_default_batch_size = int(bucket_cfg.get("batch_size") or batch_size)
     bucket_counts = Counter(train_dataset.sample_buckets)
     if bucket_counts:
         print("Bucket-Verteilung:")
