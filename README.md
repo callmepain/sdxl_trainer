@@ -22,9 +22,17 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 ### `model`
 - `id`: Pfad oder HuggingFace-ID des Basis-SDXL-Modells
 - `use_ema`, `use_bf16`, `use_gradient_checkpointing`: Trainings-Optimierungen
+- `train_text_encoders`: `true/false`, ob CLIP/Text-Encoder weitertrainiert oder eingefroren werden sollen
+
+### `run`
+- `name`: Klarer Name für den aktuellen Lauf (z. B. `new_beginning_v_0_0_4`)
+- `output_root`: Basisordner für Diffusers-Outputs (Standard `.output`)
+- `checkpoint_root`: Basisordner für Single-File-Checkpoints (Standard `<output_root>/safetensors`)
+
+> Wenn `training.output_dir` bzw. `export.checkpoint_path` leer bleiben, werden sie automatisch aus `run.*` abgeleitet (`{output_root}/{name}` und `{checkpoint_root}/{name}.safetensors`).
 
 ### `training`
-- `output_dir`: Zielordner für den Diffusers-Checkpoint
+- `output_dir`: Zielordner für den Diffusers-Checkpoint. Kann leer bleiben, wenn `run.name` gesetzt ist.
 - `num_steps` oder `num_epochs`: Stoppbedingung (mindestens eine Angabe erforderlich)
 - `lr_unet`, `lr_text_encoder`: Lernraten für UNet und beide Text-Encoder
 - `grad_accum_steps`, `batch_size`: Steuerung des effektiven Batchsizes
@@ -44,7 +52,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 
 ### `export`
 - `save_single_file`: Schaltet die Erstellung einer `.safetensors`-Checkpointdatei ein/aus
-- `checkpoint_path`: Zielpfad
+- `checkpoint_path`: Zielpfad. Kann leer bleiben, wenn `run.name` gesetzt ist.
 - `converter_script`: lokaler Pfad zum SDXL-Kompatibilitäts-Skript (`./converttosdxl.py`). Falls du ein anderes Skript einsetzen willst, hier dessen Pfad hinterlegen (Pflichtfeld).
 - `half_precision`, `use_safetensors`, `extra_args`: Feineinstellungen für den Konverter
 

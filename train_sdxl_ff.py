@@ -20,14 +20,20 @@ CONFIG_PATH = Path("config.json")
 
 DEFAULT_CONFIG = {
     "device": "cuda",
+    "run": {
+        "name": "new_run",
+        "output_root": ".output",
+        "checkpoint_root": ".output/safetensors",
+    },
     "model": {
         "id": "./new_beginning",
         "use_ema": True,
         "use_bf16": True,
         "use_gradient_checkpointing": True,
+        "train_text_encoders": True,
     },
     "training": {
-        "output_dir": "./sdxl_ff_out",
+        "output_dir": None,
         "batch_size": 4,
         "num_steps": 10_000,
         "num_epochs": None,
@@ -59,7 +65,7 @@ DEFAULT_CONFIG = {
     },
     "export": {
         "save_single_file": True,
-        "checkpoint_path": "./sdxl_ff_out.safetensors",
+        "checkpoint_path": None,
         "converter_script": "./converttosdxl.py",
         "half_precision": True,
         "use_safetensors": True,
@@ -230,6 +236,15 @@ class FlashAttnProcessor:
 
 device = cfg["device"]
 
+run_cfg = cfg.get("run", {})
+run_name = run_cfg.get("name")
+output_root = Path(run_cfg.get("output_root", ".")).expanduser()
+checkpoint_root_cfg = run_cfg.get("checkpoint_root")
+if checkpoint_root_cfg is not None:
+    checkpoint_root = Path(checkpoint_root_cfg).expanduser()
+else:
+    checkpoint_root = output_root / "safetensors"
+
 model_cfg = cfg["model"]
 training_cfg = cfg["training"]
 data_cfg = cfg["data"]
@@ -237,7 +252,14 @@ optimizer_cfg = cfg["optimizer"]
 export_cfg = cfg.get("export", {})
 
 model_id = model_cfg["id"]
-output_dir = training_cfg["output_dir"]
+output_dir_cfg = training_cfg.get("output_dir")
+if output_dir_cfg:
+    output_dir = str(output_dir_cfg)
+else:
+    if not run_name:
+        raise ValueError("Setze entweder `training.output_dir` oder `run.name` in der config.")
+    output_dir = str(output_root / run_name)
+    training_cfg["output_dir"] = output_dir
 batch_size = training_cfg["batch_size"]
 num_steps = training_cfg.get("num_steps")
 if num_steps is not None:
@@ -252,6 +274,7 @@ lr_te = training_cfg["lr_text_encoder"]
 use_ema = model_cfg["use_ema"]
 use_bf16 = model_cfg["use_bf16"]
 use_gradient_checkpointing = model_cfg["use_gradient_checkpointing"]
+train_text_encoders = bool(model_cfg.get("train_text_encoders", True))
 log_every = training_cfg.get("log_every", 50)
 if log_every is not None:
     log_every = max(1, int(log_every))
@@ -265,6 +288,15 @@ if min_sigma is not None:
     min_sigma = float(min_sigma)
 min_sigma_warmup_steps = max(0, int(training_cfg.get("min_sigma_warmup_steps", 0)))
 prediction_type_override = training_cfg.get("prediction_type")
+
+checkpoint_path_cfg = export_cfg.get("checkpoint_path")
+if checkpoint_path_cfg:
+    checkpoint_path = str(checkpoint_path_cfg)
+else:
+    if not run_name:
+        raise ValueError("Setze entweder `export.checkpoint_path` oder `run.name` in der config.")
+    checkpoint_path = str(checkpoint_root / f"{run_name}.safetensors")
+    export_cfg["checkpoint_path"] = checkpoint_path
 
 dtype = torch.bfloat16 if use_bf16 else torch.float16
 
@@ -285,17 +317,18 @@ te2 = pipe.text_encoder_2
 if use_gradient_checkpointing:
     if hasattr(unet, "enable_gradient_checkpointing"):
         unet.enable_gradient_checkpointing()
-    if hasattr(te1, "gradient_checkpointing_enable"):
+    if train_text_encoders and hasattr(te1, "gradient_checkpointing_enable"):
         te1.gradient_checkpointing_enable()
-    if hasattr(te2, "gradient_checkpointing_enable"):
+    if train_text_encoders and hasattr(te2, "gradient_checkpointing_enable"):
         te2.gradient_checkpointing_enable()
 
 # Nur VAE einfrieren (typisch für FF)
 for p in vae.parameters():
     p.requires_grad_(False)
 
-for m in [unet, te1, te2]:
-    m.requires_grad_(True)
+unet.requires_grad_(True)
+te1.requires_grad_(train_text_encoders)
+te2.requires_grad_(train_text_encoders)
 
 # 2) FlashAttention-Processor (fällt sonst auf SDPA zurück)
 unet.set_attn_processor(FlashAttnProcessor())
@@ -363,12 +396,19 @@ if min_sigma is not None and min_sigma > 0:
     )
 
 # 6) Optimizer mit Param-Groups
+param_groups = [
+    {"params": unet.parameters(), "lr": lr_unet},
+]
+if train_text_encoders:
+    param_groups.extend(
+        [
+            {"params": te1.parameters(), "lr": lr_te},
+            {"params": te2.parameters(), "lr": lr_te},
+        ]
+    )
+
 optimizer = bnb.optim.AdamW8bit(
-    [
-        {"params": unet.parameters(), "lr": lr_unet},
-        {"params": te1.parameters(), "lr": lr_te},
-        {"params": te2.parameters(), "lr": lr_te},
-    ],
+    param_groups,
     weight_decay=optimizer_cfg["weight_decay"],
     betas=tuple(optimizer_cfg.get("betas", (0.9, 0.999))),
     eps=optimizer_cfg.get("eps", 1e-8),
@@ -459,8 +499,12 @@ scaler = torch.amp.GradScaler("cuda", enabled=not use_bf16)
 
 global_step = 0
 unet.train()
-te1.train()
-te2.train()
+if train_text_encoders:
+    te1.train()
+    te2.train()
+else:
+    te1.eval()
+    te2.eval()
 
 optimizer.zero_grad(set_to_none=True)
 
