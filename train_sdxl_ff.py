@@ -36,6 +36,8 @@ DEFAULT_CONFIG = {
         "use_bf16": True,
         "use_gradient_checkpointing": True,
         "train_text_encoders": True,
+        "train_text_encoder_1": True,
+        "train_text_encoder_2": False,
         "use_torch_compile": False,
         "torch_compile_kwargs": {},
     },
@@ -392,7 +394,7 @@ if num_epochs is not None:
 if num_steps is None and num_epochs is None:
     raise ValueError("Setze bitte entweder `training.num_steps` oder `training.num_epochs` in der config.")
 lr_unet = training_cfg["lr_unet"]
-lr_te = training_cfg["lr_text_encoder"]
+lr_te_global = training_cfg.get("lr_text_encoder")
 use_ema = model_cfg["use_ema"]
 ema_decay_cfg = model_cfg.get("ema_decay", 0.9999)
 if ema_decay_cfg is None:
@@ -412,6 +414,20 @@ if not (0.0 < ema_decay < 1.0):
 use_bf16 = model_cfg["use_bf16"]
 use_gradient_checkpointing = model_cfg["use_gradient_checkpointing"]
 train_text_encoders = bool(model_cfg.get("train_text_encoders", True))
+train_text_encoder_1 = model_cfg.get("train_text_encoder_1")
+if train_text_encoder_1 is None:
+    train_text_encoder_1 = True
+train_text_encoder_1 = bool(train_text_encoder_1)
+train_text_encoder_2 = bool(model_cfg.get("train_text_encoder_2", False))
+if not train_text_encoders:
+    train_text_encoder_1 = False
+    train_text_encoder_2 = False
+lr_te1 = training_cfg.get("lr_text_encoder_1", lr_te_global)
+lr_te2 = training_cfg.get("lr_text_encoder_2", lr_te_global)
+if train_text_encoder_1 and lr_te1 is None:
+    raise ValueError("Setze `training.lr_text_encoder_1` oder `training.lr_text_encoder`, um Text-Encoder 1 zu trainieren.")
+if train_text_encoder_2 and lr_te2 is None:
+    raise ValueError("Setze `training.lr_text_encoder_2` oder `training.lr_text_encoder`, um Text-Encoder 2 zu trainieren.")
 use_torch_compile = bool(model_cfg.get("use_torch_compile", False))
 torch_compile_kwargs = model_cfg.get("torch_compile_kwargs", {}) or {}
 log_every = training_cfg.get("log_every", 50)
@@ -522,6 +538,15 @@ if min_sigma is not None:
     print(f"Min-Sigma konfiguriert: wert={min_sigma}, warmup_steps={min_sigma_warmup_steps}")
 else:
     print("Min-Sigma deaktiviert.")
+print("Text-Encoder Training:")
+print(
+    f"  Encoder 1: {'train' if train_text_encoder_1 else 'frozen'}"
+    f"{f' (lr={lr_te1})' if train_text_encoder_1 else ''}"
+)
+print(
+    f"  Encoder 2: {'train' if train_text_encoder_2 else 'frozen'}"
+    f"{f' (lr={lr_te2})' if train_text_encoder_2 else ''}"
+)
 print("================================")
 if tb_writer is not None:
     tb_writer.add_scalar("data/effective_batch", effective_batch, 0)
@@ -739,24 +764,25 @@ print(f"VAE scaling_factor verwendet: {VAE_SCALING_FACTOR}")
 if use_torch_compile:
     compile_kwargs = dict(torch_compile_kwargs)
     unet = torch.compile(unet, **compile_kwargs)
-    if train_text_encoders:
+    if train_text_encoder_1:
         te1 = torch.compile(te1, **compile_kwargs)
+    if train_text_encoder_2:
         te2 = torch.compile(te2, **compile_kwargs)
 
 if use_gradient_checkpointing:
     if hasattr(unet, "enable_gradient_checkpointing"):
         unet.enable_gradient_checkpointing()
-    if train_text_encoders and hasattr(te1, "gradient_checkpointing_enable"):
+    if train_text_encoder_1 and hasattr(te1, "gradient_checkpointing_enable"):
         te1.gradient_checkpointing_enable()
-    if train_text_encoders and hasattr(te2, "gradient_checkpointing_enable"):
+    if train_text_encoder_2 and hasattr(te2, "gradient_checkpointing_enable"):
         te2.gradient_checkpointing_enable()
 
 for p in vae.parameters():
     p.requires_grad_(False)
 
 unet.requires_grad_(True)
-te1.requires_grad_(train_text_encoders)
-te2.requires_grad_(train_text_encoders)
+te1.requires_grad_(train_text_encoder_1)
+te2.requires_grad_(train_text_encoder_2)
 
 unet.set_attn_processor(FlashAttnProcessor())
 
@@ -785,13 +811,14 @@ if min_sigma is not None:
 param_groups = [
     {"params": unet.parameters(), "lr": lr_unet},
 ]
-if train_text_encoders:
-    param_groups.extend(
-        [
-            {"params": te1.parameters(), "lr": lr_te},
-            {"params": te2.parameters(), "lr": lr_te},
-        ]
-    )
+te1_group_idx = None
+te2_group_idx = None
+if train_text_encoder_1:
+    te1_group_idx = len(param_groups)
+    param_groups.append({"params": te1.parameters(), "lr": lr_te1})
+if train_text_encoder_2:
+    te2_group_idx = len(param_groups)
+    param_groups.append({"params": te2.parameters(), "lr": lr_te2})
 
 optimizer = bnb.optim.AdamW8bit(
     param_groups,
@@ -859,11 +886,13 @@ scaler = torch.amp.GradScaler("cuda", enabled=not use_bf16)
 
 global_step = 0
 unet.train()
-if train_text_encoders:
+if train_text_encoder_1:
     te1.train()
-    te2.train()
 else:
     te1.eval()
+if train_text_encoder_2:
+    te2.train()
+else:
     te2.eval()
 
 optimizer.zero_grad(set_to_none=True)
@@ -912,10 +941,14 @@ def optimizer_step_fn(loss_value, current_step, current_accum):
     if tb_writer is not None:
         tb_writer.add_scalar("train/loss", display_loss, current_step)
         tb_writer.add_scalar("train/lr_unet", optimizer.param_groups[0]["lr"], current_step)
-        if train_text_encoders and len(optimizer.param_groups) > 1:
-            te_lrs = [group["lr"] for group in optimizer.param_groups[1:]]
-            if te_lrs:
-                tb_writer.add_scalar("train/lr_text_encoder", sum(te_lrs) / len(te_lrs), current_step)
+        if train_text_encoder_1 and te1_group_idx is not None:
+            tb_writer.add_scalar(
+                "train/lr_text_encoder_1", optimizer.param_groups[te1_group_idx]["lr"], current_step
+            )
+        if train_text_encoder_2 and te2_group_idx is not None:
+            tb_writer.add_scalar(
+                "train/lr_text_encoder_2", optimizer.param_groups[te2_group_idx]["lr"], current_step
+            )
         if grad_norm_value is not None:
             tb_writer.add_scalar("train/grad_norm", grad_norm_value, current_step)
         if tb_log_scaler:

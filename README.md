@@ -23,7 +23,8 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 ### `model`
 - `id`: Pfad oder HuggingFace-ID des Basis-SDXL-Modells
 - `use_ema`, `ema_decay`, `use_bf16`, `use_gradient_checkpointing`: Trainings-Optimierungen
-- `train_text_encoders`: `true/false`, ob CLIP/Text-Encoder weitertrainiert oder eingefroren werden sollen
+- `train_text_encoders`: globaler Master-Switch für die Text-Encoder.
+- `train_text_encoder_1` / `train_text_encoder_2`: feingranulare Flags, ob der jeweilige CLIP-Encoder trainiert wird (Defaults: TE1 `true`, TE2 `false`). Wenn `train_text_encoders=false`, werden beide ignoriert.
 - `use_torch_compile`: aktiviert `torch.compile` (Inductor). Im Zweifel erst testen, manche Kombinationen funktionieren nicht stabil.
 - `torch_compile_kwargs`: optionale Dictionary-Parameter für `torch.compile` (z. B. `{ "mode": "max-autotune" }`)
 - `ema_decay`: Glättungsfaktor für die EMA-Gewichte (zwischen 0 und 1, Standard 0.9999). Wird nur genutzt, wenn `use_ema=true`.
@@ -38,7 +39,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 ### `training`
 - `output_dir`: Zielordner für den Diffusers-Checkpoint. Kann leer bleiben, wenn `run.name` gesetzt ist.
 - `num_steps` oder `num_epochs`: Stoppbedingung (mindestens eine Angabe erforderlich)
-- `lr_unet`, `lr_text_encoder`: Lernraten für UNet und beide Text-Encoder
+- `lr_unet`, `lr_text_encoder_1`, `lr_text_encoder_2`: Lernraten für UNet und beide Text-Encoder (TE2 optional). `lr_text_encoder` dient als Fallback, falls pro-Encoder-Werte fehlen.
 - `grad_accum_steps`, `batch_size`: Steuerung des effektiven Batchsizes
 - `noise_offset`: Stärke des Noise-Offsets (z. B. 0.1)
 - `min_sigma` & `min_sigma_warmup_steps`: Begrenzen sehr kleine Sigmas (z. B. 0.4 mit 500 Warmup-Schritten); Einsätze greifen erst nach dem Warmup und ändern niemals die Scheduler-Timesteps, sondern nur die Loss-Gewichtung.
