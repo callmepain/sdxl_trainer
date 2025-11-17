@@ -802,42 +802,31 @@ class MinSigmaController:
         self.sigma_lookup = sigma_lookup_tensor
         self.min_sigma = min_sigma_value if self.active else None
         self.warmup_steps = warmup_steps if self.active else 0
-        self.min_timestep = None
-        self._min_timestep_tensor = None
-        if self.active:
-            target = torch.tensor(
-                self.min_sigma, device=self.sigma_lookup.device, dtype=self.sigma_lookup.dtype
-            )
-            idx = torch.searchsorted(self.sigma_lookup, target, right=False)
-            idx = torch.clamp(idx, max=self.sigma_lookup.shape[0] - 1)
-            self.min_timestep = int(idx.item())
-            if self.min_timestep <= 0:
-                self.active = False
+        self._min_sigma_tensor = None
 
     def __call__(self, timesteps: torch.LongTensor, step_idx: int):
-        if not self.active or self.min_timestep is None:
-            return timesteps, None, None
+        if not self.active:
+            return None, None
 
-        sigma_before = self.sigma_lookup.index_select(0, timesteps)
+        sigma_original = self.sigma_lookup.index_select(0, timesteps)
 
         if step_idx < self.warmup_steps:
-            return timesteps, sigma_before, sigma_before
+            return sigma_original, None
 
-        if self._min_timestep_tensor is None or self._min_timestep_tensor.device != timesteps.device:
-            self._min_timestep_tensor = torch.tensor(
-                self.min_timestep, device=timesteps.device, dtype=timesteps.dtype
+        if self._min_sigma_tensor is None or self._min_sigma_tensor.device != sigma_original.device:
+            self._min_sigma_tensor = torch.tensor(
+                self.min_sigma,
+                device=sigma_original.device,
+                dtype=sigma_original.dtype,
             )
-        min_lim = self._min_timestep_tensor
-        adjusted = torch.clamp(timesteps, min=min_lim)
-        sigma_after = self.sigma_lookup.index_select(0, adjusted)
-        return adjusted, sigma_before, sigma_after
+        sigma_effective = torch.maximum(sigma_original, self._min_sigma_tensor)
+        return sigma_original, sigma_effective
 
 
 enforce_min_sigma = MinSigmaController(sigma_lookup, min_sigma, min_sigma_warmup_steps)
 if enforce_min_sigma.active:
     print(
-        f"Min-Sigma Enforcement aktiv (min_sigma={min_sigma}, warmup_steps={enforce_min_sigma.warmup_steps}, "
-        f"min_timestep={enforce_min_sigma.min_timestep})"
+        f"Min-Sigma Enforcement aktiv (min_sigma={min_sigma}, warmup_steps={enforce_min_sigma.warmup_steps})"
     )
 elif min_sigma is not None:
     print("Min-Sigma-Konfiguration erkannt, aber Enforcement ist deaktiviert (Warmup oder Grenzwert unwirksam).")
@@ -951,11 +940,12 @@ while True:
                 device=device,
                 dtype=torch.long,
             )
-            timesteps, sigma_before, sigma_after = enforce_min_sigma(timesteps, global_step)
-            if tb_writer is not None and sigma_before is not None:
-                tb_writer.add_scalar("train/sigma/original", sigma_before.mean().item(), global_step)
-                if sigma_after is not None and global_step >= enforce_min_sigma.warmup_steps:
-                    tb_writer.add_scalar("train/sigma/clamped", sigma_after.mean().item(), global_step)
+            sigma_original, sigma_effective = enforce_min_sigma(timesteps, global_step)
+            sigma_for_loss = sigma_effective if sigma_effective is not None else sigma_original
+            if tb_writer is not None and sigma_original is not None:
+                tb_writer.add_scalar("train/sigma/original", sigma_original.mean().item(), global_step)
+                if sigma_effective is not None:
+                    tb_writer.add_scalar("train/sigma/effective", sigma_effective.mean().item(), global_step)
 
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
@@ -1000,8 +990,12 @@ while True:
             per_example_loss = torch.mean((model_pred.float() - target.float()) ** 2, dim=loss_dims)
 
             if snr_gamma is not None and prediction_type in ("epsilon", "v_prediction"):
-                alphas_now = alphas_cumprod_tensor.index_select(0, timesteps).to(per_example_loss.dtype)
-                snr_vals = alphas_now / torch.clamp(1 - alphas_now, min=1e-8)
+                if sigma_for_loss is not None:
+                    sigma_vals = sigma_for_loss.to(per_example_loss.dtype)
+                    snr_vals = 1.0 / torch.clamp(sigma_vals ** 2, min=1e-8)
+                else:
+                    alphas_now = alphas_cumprod_tensor.index_select(0, timesteps).to(per_example_loss.dtype)
+                    snr_vals = alphas_now / torch.clamp(1 - alphas_now, min=1e-8)
                 gamma_tensor = torch.full_like(snr_vals, snr_gamma)
                 snr_weights = torch.minimum(snr_vals, gamma_tensor) / torch.clamp(snr_vals, min=1e-8)
                 per_example_loss = per_example_loss * snr_weights
