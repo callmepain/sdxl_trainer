@@ -48,6 +48,8 @@ DEFAULT_CONFIG = {
         "num_epochs": None,
         "lr_unet": 5e-6,
         "lr_text_encoder": 1e-6,
+        "lr_text_encoder_1": None,
+        "lr_text_encoder_2": None,
         "log_every": 50,
         "checkpoint_every": 1_000,
         "grad_accum_steps": 1,
@@ -60,6 +62,9 @@ DEFAULT_CONFIG = {
         "detect_anomaly": True,
         "lr_warmup_steps": 0,
         "ema_update_every": 10,
+        "resume_from": None,
+        "resume_state_path": None,
+        "state_path": None,
         "tensorboard": {
             "enabled": False,
             "log_dir": None,
@@ -376,14 +381,57 @@ optimizer_cfg = cfg["optimizer"]
 export_cfg = cfg.get("export", {})
 
 model_id = model_cfg["id"]
+resume_from_cfg = training_cfg.get("resume_from")
+resume_from_path = Path(resume_from_cfg).expanduser() if resume_from_cfg else None
+if resume_from_path is not None and not resume_from_path.exists():
+    warnings.warn(f"Resume-Pfad {resume_from_path} nicht gefunden. Starte vom Basis-Modell.", stacklevel=2)
+    resume_from_path = None
 output_dir_cfg = training_cfg.get("output_dir")
 if output_dir_cfg:
     output_dir = str(output_dir_cfg)
+elif resume_from_path is not None:
+    output_dir = str(resume_from_path)
 else:
     if not run_name:
         raise ValueError("Setze entweder `training.output_dir` oder `run.name` in der config.")
     output_dir = str(output_root / run_name)
     training_cfg["output_dir"] = output_dir
+model_load_path = str(resume_from_path) if resume_from_path is not None else model_id
+state_path_cfg = training_cfg.get("state_path")
+if state_path_cfg:
+    state_save_path = Path(state_path_cfg).expanduser()
+else:
+    state_save_path = Path(output_dir).expanduser() / "trainer_state.pt"
+resume_state_path_cfg = training_cfg.get("resume_state_path")
+if resume_state_path_cfg:
+    resume_state_path = Path(resume_state_path_cfg).expanduser()
+elif resume_from_path is not None:
+    resume_state_path = resume_from_path / "trainer_state.pt"
+else:
+    resume_state_path = state_save_path
+resume_state_dict = None
+resume_global_step = 0
+resume_epoch = 0
+resume_state_active = bool(resume_from_path is not None or resume_state_path_cfg is not None)
+if resume_state_active and resume_state_path is not None and resume_state_path.exists():
+    try:
+        resume_state_dict = torch.load(resume_state_path, map_location="cpu")
+        resume_global_step = int(resume_state_dict.get("global_step", 0) or 0)
+        resume_epoch = int(resume_state_dict.get("epoch", 0) or 0)
+        print(
+            f"Trainer-State geladen aus {resume_state_path} "
+            f"(step={resume_global_step}, epoch={resume_epoch})"
+        )
+    except Exception as exc:
+        warnings.warn(f"Trainer-State konnte nicht geladen werden ({exc}). Starte frisch.", stacklevel=2)
+        resume_state_dict = None
+        resume_global_step = 0
+        resume_epoch = 0
+elif resume_state_active and resume_state_path is not None:
+    warnings.warn(
+        f"Kein Trainer-State unter {resume_state_path} gefunden. Gewichte werden geladen, Optimizer startet frisch.",
+        stacklevel=2,
+    )
 batch_size = training_cfg["batch_size"]
 num_steps = training_cfg.get("num_steps")
 if num_steps is not None:
@@ -499,10 +547,10 @@ dtype = torch.bfloat16 if use_bf16 else torch.float16
 
 # 1) Tokenizer laden (ohne Pipeline)
 tokenizer_1 = AutoTokenizer.from_pretrained(
-    model_id, subfolder="tokenizer", use_fast=False
+    model_load_path, subfolder="tokenizer", use_fast=False
 )
 tokenizer_2 = AutoTokenizer.from_pretrained(
-    model_id, subfolder="tokenizer_2", use_fast=False
+    model_load_path, subfolder="tokenizer_2", use_fast=False
 )
 
 # 2) Dataset + Dataloader
@@ -528,7 +576,7 @@ bucket_enabled = bool(bucket_cfg.get("enabled", False))
 bucket_default_batch_size = int(bucket_cfg.get("batch_size") or batch_size) if bucket_enabled else batch_size
 effective_batch = bucket_default_batch_size * grad_accum_steps
 print("==== Trainingskonfiguration ====")
-print(f"Modell-ID: {model_id}")
+print(f"Modell-Quelle: {model_load_path}")
 print(f"Konfiguriertes Batch-Size-Basismaß: {bucket_default_batch_size}{' (Bucket-Default)' if bucket_enabled else ''}")
 if bucket_batch_size_map:
     print(f"Bucket-spezifische Batchsizes: {bucket_batch_size_map}")
@@ -551,7 +599,7 @@ print("================================")
 if tb_writer is not None:
     tb_writer.add_scalar("data/effective_batch", effective_batch, 0)
     tb_writer.add_scalar("data/grad_accum_steps", grad_accum_steps, 0)
-    tb_writer.add_text("run/meta", f"model_id: {model_id}\nrun_name: {run_name or 'n/a'}\noutput_dir: {output_dir}")
+    tb_writer.add_text("run/meta", f"model_id: {model_load_path}\nrun_name: {run_name or 'n/a'}\noutput_dir: {output_dir}")
 
 train_dataset = SimpleCaptionDataset(
     img_dir=data_cfg["image_dir"],
@@ -694,7 +742,7 @@ def ensure_latent_cache(dataset, cache_cfg):
     total = len(missing)
     print(f"Latent-Cache: Generiere {total} Einträge in {dataset.latent_cache_dir} ...")
 
-    vae_local = AutoencoderKL.from_pretrained(model_id, subfolder="vae", torch_dtype=dtype)
+    vae_local = AutoencoderKL.from_pretrained(model_load_path, subfolder="vae", torch_dtype=dtype)
     vae_local.to(device)
     vae_local.eval()
     cache_scaling_factor = getattr(getattr(vae_local, "config", None), "scaling_factor", 0.18215)
@@ -743,9 +791,23 @@ if latent_cache_cfg.get("enabled", False):
     ensure_latent_cache(train_dataset, latent_cache_cfg)
 
 
+def save_training_state(state_path: Path, optimizer, scaler, ema_model, global_step: int, epoch: int) -> None:
+    state_path = state_path.expanduser()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "global_step": int(global_step),
+        "epoch": int(epoch),
+        "optimizer": optimizer.state_dict(),
+        "scaler": scaler.state_dict(),
+    }
+    if ema_model is not None:
+        payload["ema"] = ema_model.state_dict()
+    torch.save(payload, state_path)
+
+
 # 3) Pipeline laden
 pipe = StableDiffusionXLPipeline.from_pretrained(
-    model_id,
+    model_load_path,
     torch_dtype=dtype,
     use_safetensors=True,
 )
@@ -829,6 +891,19 @@ optimizer = bnb.optim.AdamW8bit(
 
 # 6) EMA
 ema_unet = EMAModel(unet.parameters(), decay=ema_decay) if use_ema else None
+if resume_state_dict is not None:
+    opt_state = resume_state_dict.get("optimizer")
+    if opt_state is not None:
+        try:
+            optimizer.load_state_dict(opt_state)
+        except Exception as exc:
+            warnings.warn(f"Optimizer-Status konnte nicht geladen werden ({exc}).", stacklevel=2)
+    ema_state = resume_state_dict.get("ema")
+    if ema_state is not None and ema_unet is not None:
+        try:
+            ema_unet.load_state_dict(ema_state)
+        except Exception as exc:
+            warnings.warn(f"EMA-Status konnte nicht geladen werden ({exc}).", stacklevel=2)
 
 lr_scheduler = None
 if lr_warmup_steps and lr_warmup_steps > 0:
@@ -883,8 +958,15 @@ elif min_sigma is not None:
 # 9) Training Loop
 
 scaler = torch.amp.GradScaler("cuda", enabled=not use_bf16)
+if resume_state_dict is not None:
+    scaler_state = resume_state_dict.get("scaler")
+    if scaler_state is not None:
+        try:
+            scaler.load_state_dict(scaler_state)
+        except Exception as exc:
+            warnings.warn(f"AMP-Scaler konnte nicht geladen werden ({exc}).", stacklevel=2)
 
-global_step = 0
+global_step = resume_global_step
 unet.train()
 if train_text_encoder_1:
     te1.train()
@@ -897,7 +979,10 @@ else:
 
 optimizer.zero_grad(set_to_none=True)
 
-pbar = tqdm(total=total_progress_steps, desc="SDXL Training", unit="step")
+pbar_total = total_progress_steps
+if pbar_total is not None and global_step > pbar_total:
+    pbar_total = global_step
+pbar = tqdm(total=pbar_total, desc="SDXL Training", unit="step", initial=global_step)
 accum_counter = 0
 last_loss_value = 0.0
 
@@ -961,13 +1046,14 @@ def optimizer_step_fn(loss_value, current_step, current_accum):
             ema_unet.copy_to(unet.parameters())
 
         pipe.save_pretrained(f"{output_dir}_step_{current_step}")
+        save_training_state(state_save_path, optimizer, scaler, ema_unet, current_step, epoch)
 
         if ema_unet is not None:
             ema_unet.restore(unet.parameters())
 
     return current_step, current_accum
 
-epoch = 0
+epoch = resume_epoch
 while True:
     if num_epochs is not None and epoch >= num_epochs:
         break
@@ -1098,6 +1184,7 @@ if ema_unet is not None:
     ema_unet.copy_to(unet.parameters())
 
 pipe.save_pretrained(output_dir)
+save_training_state(state_save_path, optimizer, scaler, ema_unet, global_step, epoch)
 
 if tb_writer is not None:
     tb_writer.flush()

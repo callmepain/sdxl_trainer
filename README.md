@@ -49,6 +49,9 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `detect_anomaly`: bricht das Training ab, sobald NaN/Inf im Loss auftauchen.
 - `lr_warmup_steps`: Lineares Warmup der Lernrate über die ersten N Optimizer-Schritte (typisch 100–500).
 - `ema_update_every`: Wie oft (in Steps) die EMA nach `lr_warmup_steps` aktualisiert wird; Standard 10. Davor bleibt EMA inaktiv.
+- `resume_from`: Pfad zu einem bestehenden Diffusers-Output, dessen Gewichte weitertrainiert werden sollen.
+- `resume_state_path`: Optionaler Pfad zu einer gespeicherten Trainer-State-Datei (`trainer_state.pt`). Wenn nicht gesetzt, wird bei `resume_from` automatisch `<resume_from>/trainer_state.pt` verwendet.
+- `state_path`: Zielpfad für den Trainer-State des aktuellen Laufs (Standard: `<output_dir>/trainer_state.pt`). Enthält Optimizer-, Scaler- und EMA-Status.
 - `tensorboard`: Block zur Aktivierung des TensorBoard-Loggings, z. B.:
   ```json
   "tensorboard": {
@@ -126,7 +129,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 Während des Trainings:
 - Fortschritt via `tqdm`-Statusleiste
 - Optionales Logging/Checkpointing gemäß Config
-- Nach Abschluss (und optionaler EMA-Übernahme) wird das Modell gespeichert und – falls aktiviert – der single-file Konverter gestartet.
+- Nach Abschluss (und optionaler EMA-Übernahme) wird das Modell gespeichert, der Trainer-State (`trainer_state.pt`) aktualisiert und – falls aktiviert – der single-file Konverter gestartet. Für Resume einfach `training.resume_from` und ggf. `resume_state_path` setzen.
 
 ## Ergebnis nutzen
 
