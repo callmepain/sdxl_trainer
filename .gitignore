@@ -16,8 +16,9 @@ wandb/
 *.safetensors
 *.ckpt
 *.pt
+*.png
 flash-attention/
-
+decoded_latents/
 # Daten
 data/images/
 data/*
