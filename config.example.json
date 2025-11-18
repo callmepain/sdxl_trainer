@@ -34,9 +34,11 @@
     "lr_warmup_steps": 0,
     "seed": null,
     "lr_scheduler": {
-      "type": "cosine_decay",
+      "type": "cosine_restarts",
       "warmup_steps": 200,
-      "min_factor": 0.3
+      "min_factor": 0.3,
+      "cycle_steps": 400,
+      "cycle_mult": 1.0
     },
     "tensorboard": {
       "enabled": false,

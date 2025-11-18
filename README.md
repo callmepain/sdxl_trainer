@@ -120,7 +120,17 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - Min-SNR-gewichtetet Loss (`training.snr_gamma`) reduziert den Einfluss von extrem verrauschten Schritten.
 - `training.max_grad_norm` aktiviert Gradient-Clipping (z. B. 1.0), `training.detect_anomaly` bricht bei NaN/Inf sofort ab.
 - `training.lr_warmup_steps` erlaubt lineares Warmup der Lernrate (empfohlen 100–500 Schritte).
-- `training.lr_scheduler`: neuer Block für skalare LR-Faktoren (`type`: `constant`, `linear_decay`, `cosine_decay`, `warmup_steps`, `min_factor`). Der Faktor wird auf alle Param-Gruppen (UNet/TEs) angewendet; während des Warmups geht er linear von 0 → 1, anschließend entweder konstant oder mit dem gewählten Decay weiter. Wenn der Block fehlt, verhält sich der Trainer wie früher (keine Decays; optionales Legacy-Warmup über `training.lr_warmup_steps`).
+- `training.lr_scheduler`: neuer Block für skalare LR-Faktoren (`type`: `constant`, `linear_decay`, `cosine_decay`, `cosine_restarts`, `warmup_steps`, `min_factor`). Der Faktor wird auf alle Param-Gruppen (UNet/TEs) angewendet; während des Warmups geht er linear von 0 → 1, anschließend entweder konstant oder mit dem gewählten Decay weiter. Wenn der Block fehlt, verhält sich der Trainer wie früher (keine Decays; optionales Legacy-Warmup über `training.lr_warmup_steps`).
+  - `cosine_restarts` führt zyklische Cosine-Decay-Phasen aus (SGDR-Style): `cycle_steps` definiert die Länge eines Zyklus nach dem Warmup, `cycle_mult` (>1.0 → Zyklen werden länger, =1.0 → konstante Länge). Beispiel:
+    ```json
+    "lr_scheduler": {
+      "type": "cosine_restarts",
+      "warmup_steps": 200,
+      "min_factor": 0.3,
+      "cycle_steps": 400,
+      "cycle_mult": 1.0
+    }
+    ```
 - Beim Start werden – sofern Buckets aktiv sind – die tatsächlichen Bucket-Verteilungen inklusive effektiver Batchgrößen geloggt.
 - Für TensorBoard: `tensorboard --logdir ./logs/tensorboard` starten (oder den in der Config gesetzten Pfad) und im Browser öffnen. Es werden Loss, Lernraten (UNet/Text-Encoder), Grad-Norm (optional), AMP-Scale, Bucket-Verteilung sowie Basis-Metadaten (Effektiv-Batchsize, Anzahl Samples) geloggt.
 
