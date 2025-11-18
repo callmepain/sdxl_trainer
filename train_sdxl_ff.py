@@ -2,11 +2,13 @@ import warnings
 import json
 import copy
 import math
+import random
 import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
 import torch
 import bitsandbytes as bnb
 warnings.filterwarnings(
@@ -73,6 +75,7 @@ DEFAULT_CONFIG = {
         "resume_from": None,
         "resume_state_path": None,
         "state_path": None,
+        "seed": None,
         "tensorboard": {
             "enabled": False,
             "log_dir": None,
@@ -549,6 +552,25 @@ else:
     export_cfg["checkpoint_path"] = checkpoint_path
 
 dtype = torch.bfloat16 if use_bf16 else torch.float16
+
+seed_value = training_cfg.get("seed")
+if seed_value is not None:
+    try:
+        seed_value = int(seed_value)
+    except (TypeError, ValueError):
+        warnings.warn(f"Ungültiger seed-Wert ({seed_value}), verwende zufälligen Seed.", stacklevel=2)
+        seed_value = None
+if seed_value is not None and seed_value <= 0:
+    seed_value = None
+if seed_value is not None:
+    random.seed(seed_value)
+    torch.manual_seed(seed_value)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed_value)
+    np.random.seed(seed_value)
+    print(f"Seed gesetzt: {seed_value}")
+else:
+    print("Seed: random (kein fixer Seed gesetzt)")
 
 # 1) Tokenizer laden (ohne Pipeline)
 tokenizer_1 = AutoTokenizer.from_pretrained(

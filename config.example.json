@@ -32,6 +32,7 @@
     "max_grad_norm": null,
     "detect_anomaly": true,
     "lr_warmup_steps": 0,
+    "seed": null,
     "tensorboard": {
       "enabled": false,
       "log_dir": null,

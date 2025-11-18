@@ -39,6 +39,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `output_dir`: Zielordner für den Diffusers-Checkpoint. Kann leer bleiben, wenn `run.name` gesetzt ist.
 - `num_steps` oder `num_epochs`: Stoppbedingung (mindestens eine Angabe erforderlich)
 - `lr_unet`, `lr_text_encoder_1`, `lr_text_encoder_2`: Lernraten für UNet sowie beide Text-Encoder (TE2 optional). Die Encoder-Werte müssen explizit gesetzt werden, wenn sie trainiert werden sollen.
+- `seed`: Fixiert alle RNGs (Python, NumPy, Torch CPU/GPU). `null` oder `0` -> zufälliger Seed pro Run.
 - `grad_accum_steps`, `batch_size`: Steuerung des effektiven Batchsizes
 - `noise_offset`: Stärke des Noise-Offsets (z. B. 0.1)
 - `min_sigma` & `min_sigma_warmup_steps`: Begrenzen sehr kleine Sigmas (z. B. 0.4 mit 500 Warmup-Schritten); Einsätze greifen erst nach dem Warmup und ändern niemals die Scheduler-Timesteps, sondern nur die Loss-Gewichtung.
