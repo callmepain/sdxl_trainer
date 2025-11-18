@@ -107,6 +107,13 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `converter_script`: lokaler Pfad zum SDXL-Kompatibilitäts-Skript (`./converttosdxl.py`). Falls du ein anderes Skript einsetzen willst, hier dessen Pfad hinterlegen (Pflichtfeld).
 - `half_precision`, `use_safetensors`, `extra_args`: Feineinstellungen für den Konverter
 
+### `eval`
+- Gemeinsame Felder: `backend` (`diffusers` oder `kdiffusion`), `sampler_name` (z. B. `dpmpp_2m_sde_heun`), `scheduler` (Diffusers-Schedulername oder Shortcuts wie `beta`, `euler`, `lms`), `num_inference_steps`, `cfg_scale`, `prompts_path` (JSON mit `[{"prompt": ..., "negative_prompt": ..., "seed": ...}]`, Beispiel in `data/eval_prompts.example.json`) sowie `use_ema`, um während der Eval temporär EMA-Gewichte auf den UNet zu kopieren.
+- `live`: `enabled`, `every_n_steps` und optional `max_batches`, um pro Zwischen-Eval nur die ersten N Prompts zu rendern. Ergebnisse landen unter `.output/<run>/eval/live/step_<global_step>/`.
+- `final`: aktiviert einen Abschluss-Eval nach dem letzten Trainingstep; optional eigenes `max_batches`. Ausgabe unter `.output/<run>/eval/final/`.
+- Während `run_eval()` werden alle relevanten Module in `eval()` versetzt, `torch.inference_mode()` aktiviert und nach Abschluss der ursprüngliche Train-Zustand wiederhergestellt. TensorBoard erhält einen kurzen Text-Eintrag (`eval/live` bzw. `eval/final`).
+- Für `backend: kdiffusion` nutzt der Trainer intern die `StableDiffusionXLKDiffusionPipeline` aus diffusers und propagiert Sampler/Scheduler-Einstellungen 1:1 weiter (siehe zusätzliche Abhängigkeit `k-diffusion` in `requirements.txt`).
+
 ### Stabilität & Monitoring
 - Min-SNR-gewichtetet Loss (`training.snr_gamma`) reduziert den Einfluss von extrem verrauschten Schritten.
 - `training.max_grad_norm` aktiviert Gradient-Clipping (z. B. 1.0), `training.detect_anomaly` bricht bei NaN/Inf sofort ab.

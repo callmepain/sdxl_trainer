@@ -81,5 +81,23 @@
     "half_precision": true,
     "use_safetensors": true,
     "extra_args": []
+  },
+  "eval": {
+    "backend": "diffusers",
+    "sampler_name": "dpmpp_2m_sde_heun",
+    "scheduler": "EulerAncestralDiscreteScheduler",
+    "num_inference_steps": 35,
+    "cfg_scale": 6.5,
+    "prompts_path": "./data/eval_prompts.example.json",
+    "use_ema": true,
+    "live": {
+      "enabled": false,
+      "every_n_steps": 200,
+      "max_batches": null
+    },
+    "final": {
+      "enabled": false,
+      "max_batches": null
+    }
   }
 }
