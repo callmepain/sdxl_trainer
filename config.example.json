@@ -10,7 +10,6 @@
     "use_ema": true,
     "use_bf16": true,
     "use_gradient_checkpointing": true,
-    "train_text_encoders": true,
     "use_torch_compile": false,
     "torch_compile_kwargs": {}
   },
@@ -20,7 +19,8 @@
     "num_steps": null,
     "num_epochs": 1,
     "lr_unet": 5e-06,
-    "lr_text_encoder": 1e-06,
+    "lr_text_encoder_1": 1e-06,
+    "lr_text_encoder_2": null,
     "log_every": 50,
     "checkpoint_every": 1000,
     "grad_accum_steps": 1,

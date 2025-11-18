@@ -45,7 +45,6 @@ DEFAULT_CONFIG = {
         "ema_decay": 0.9999,
         "use_bf16": True,
         "use_gradient_checkpointing": True,
-        "train_text_encoders": True,
         "train_text_encoder_1": True,
         "train_text_encoder_2": False,
         "use_torch_compile": False,
@@ -57,7 +56,6 @@ DEFAULT_CONFIG = {
         "num_steps": 10_000,
         "num_epochs": None,
         "lr_unet": 5e-6,
-        "lr_text_encoder": 1e-6,
         "lr_text_encoder_1": None,
         "lr_text_encoder_2": None,
         "log_every": 50,
@@ -454,7 +452,6 @@ if num_epochs is not None:
 if num_steps is None and num_epochs is None:
     raise ValueError("Setze bitte entweder `training.num_steps` oder `training.num_epochs` in der config.")
 lr_unet = training_cfg["lr_unet"]
-lr_te_global = training_cfg.get("lr_text_encoder")
 use_ema = model_cfg["use_ema"]
 ema_decay_cfg = model_cfg.get("ema_decay", 0.9999)
 if ema_decay_cfg is None:
@@ -473,21 +470,17 @@ if not (0.0 < ema_decay < 1.0):
     ema_decay = 0.9999
 use_bf16 = model_cfg["use_bf16"]
 use_gradient_checkpointing = model_cfg["use_gradient_checkpointing"]
-train_text_encoders = bool(model_cfg.get("train_text_encoders", True))
 train_text_encoder_1 = model_cfg.get("train_text_encoder_1")
 if train_text_encoder_1 is None:
     train_text_encoder_1 = True
 train_text_encoder_1 = bool(train_text_encoder_1)
 train_text_encoder_2 = bool(model_cfg.get("train_text_encoder_2", False))
-if not train_text_encoders:
-    train_text_encoder_1 = False
-    train_text_encoder_2 = False
-lr_te1 = training_cfg.get("lr_text_encoder_1", lr_te_global)
-lr_te2 = training_cfg.get("lr_text_encoder_2", lr_te_global)
+lr_te1 = training_cfg.get("lr_text_encoder_1")
+lr_te2 = training_cfg.get("lr_text_encoder_2")
 if train_text_encoder_1 and lr_te1 is None:
-    raise ValueError("Setze `training.lr_text_encoder_1` oder `training.lr_text_encoder`, um Text-Encoder 1 zu trainieren.")
+    raise ValueError("Setze `training.lr_text_encoder_1`, um Text-Encoder 1 zu trainieren.")
 if train_text_encoder_2 and lr_te2 is None:
-    raise ValueError("Setze `training.lr_text_encoder_2` oder `training.lr_text_encoder`, um Text-Encoder 2 zu trainieren.")
+    raise ValueError("Setze `training.lr_text_encoder_2`, um Text-Encoder 2 zu trainieren.")
 use_torch_compile = bool(model_cfg.get("use_torch_compile", False))
 torch_compile_kwargs = model_cfg.get("torch_compile_kwargs", {}) or {}
 log_every = training_cfg.get("log_every", 50)
@@ -624,6 +617,7 @@ train_dataset = SimpleCaptionDataset(
     caption_shuffle_min_tokens=caption_shuffle_min_tokens,
     bucket_config=bucket_cfg,
     latent_cache_config=latent_cache_cfg,
+    pixel_dtype=dtype,
 )
 if tb_writer is not None:
     tb_writer.add_scalar("data/num_samples", len(train_dataset), 0)
@@ -679,13 +673,14 @@ def encode_text(captions_batch):
     input_ids_2 = captions_batch["input_ids_2"].to(device)
     attn_2 = captions_batch["attention_mask_2"].to(device)
 
-    with torch.no_grad():
+    with torch.set_grad_enabled(train_text_encoder_1):
         enc_1 = te1(
             input_ids_1,
             attention_mask=attn_1,
             output_hidden_states=True,
             return_dict=True,
         )
+    with torch.set_grad_enabled(train_text_encoder_2):
         enc_2 = te2(
             input_ids_2,
             attention_mask=attn_2,

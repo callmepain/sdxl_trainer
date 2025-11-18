@@ -24,6 +24,7 @@ class SimpleCaptionDataset(Dataset):
         caption_shuffle_min_tokens=2,
         bucket_config=None,
         latent_cache_config=None,
+        pixel_dtype=None,
     ):
         self.img_dir = Path(img_dir)
         self.size = size
@@ -55,9 +56,12 @@ class SimpleCaptionDataset(Dataset):
             self.bucket_divisible = 8
         self.latent_cache_cfg = latent_cache_config or {}
         self.latent_cache_enabled = bool(self.latent_cache_cfg.get("enabled", False))
+        self.latent_cache_version = str(self.latent_cache_cfg.get("version", 1) or 1)
         self.sample_target_sizes = []
         self.sample_buckets = []
         self.original_sizes = []
+        self.file_signatures = []
+        self.pixel_dtype = self._resolve_pixel_dtype(pixel_dtype)
         self._prepare_samples()
         self.latent_cache_active = False
         self.latent_cache_dir = None
@@ -141,6 +145,7 @@ class SimpleCaptionDataset(Dataset):
                 width = height = self.size
 
             self.original_sizes.append((width, height))
+            self.file_signatures.append(self._file_signature(path))
 
             if self.use_buckets:
                 target_size = self._choose_bucket(width, height)
@@ -163,9 +168,52 @@ class SimpleCaptionDataset(Dataset):
             raise ValueError("Latent cache directory is not initialized.")
         rel = self.files[idx].relative_to(self.img_dir)
         size_w, size_h = self.sample_target_sizes[idx]
-        key = hashlib.sha1(str(rel).encode("utf-8")).hexdigest()
+        signature = self.file_signatures[idx] if idx < len(self.file_signatures) else {}
+        payload = "|".join(
+            [
+                str(rel),
+                str(signature.get("size", 0)),
+                str(signature.get("mtime_ns", 0)),
+                f"{size_w}x{size_h}",
+                self.latent_cache_version,
+            ]
+        )
+        key = hashlib.sha1(payload.encode("utf-8")).hexdigest()
         filename = f"{key}_{size_w}x{size_h}.safetensors"
         return self.latent_cache_dir / filename
+
+    def _file_signature(self, path: Path):
+        try:
+            stat = path.stat()
+        except OSError:
+            return {"size": 0, "mtime_ns": 0}
+        mtime_ns = getattr(stat, "st_mtime_ns", None)
+        if mtime_ns is None:
+            mtime_ns = int(stat.st_mtime * 1e9)
+        return {
+            "size": int(getattr(stat, "st_size", 0)),
+            "mtime_ns": int(mtime_ns),
+        }
+
+    def _resolve_pixel_dtype(self, value):
+        if value is None:
+            return None
+        if isinstance(value, torch.dtype):
+            return value
+        if isinstance(value, str):
+            key = value.strip().lower()
+            mapping = {
+                "fp16": torch.float16,
+                "float16": torch.float16,
+                "half": torch.float16,
+                "bf16": torch.bfloat16,
+                "bfloat16": torch.bfloat16,
+                "fp32": torch.float32,
+                "float32": torch.float32,
+            }
+            if key in mapping:
+                return mapping[key]
+        raise ValueError(f"Unsupported pixel dtype: {value}")
 
     def refresh_latent_cache_state(self):
         if not self.latent_cache_enabled:
@@ -285,7 +333,9 @@ class SimpleCaptionDataset(Dataset):
         else:
             image = self._load_image_tensor(img_path)
             image = self._resize_for_target(image, (target_width, target_height))
-            sample["pixel_values"] = image.half().contiguous()
+            if self.pixel_dtype is not None:
+                image = image.to(self.pixel_dtype)
+            sample["pixel_values"] = image.contiguous()
 
         return sample
 
