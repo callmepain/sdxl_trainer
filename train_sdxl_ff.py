@@ -393,6 +393,7 @@ class EvalRunner:
                     self._generate_with_kdiffusion(selected, dest, eval_type, step)
                 else:
                     self._generate_with_diffusers(selected, dest, eval_type, step)
+        self._cleanup_after_eval()
 
     def _build_eval_dir(self, eval_type: str, step: int) -> Path:
         base = self.output_dir / "eval" / eval_type
@@ -509,6 +510,7 @@ class EvalRunner:
             image = result.images[0]
             filename = dest / f"step_{step:06d}_idx_{idx:03d}_seed_{seed}.png"
             image.save(filename)
+        self._kdiff_pipe = None
 
     def _normalized_sampler_name(self):
         if not self.sampler_name:
@@ -571,6 +573,12 @@ class EvalRunner:
         except Exception as exc:  # noqa: BLE001
             warnings.warn(f"Scheduler {scheduler_cls_name} konnte nicht initialisiert werden ({exc}).", stacklevel=2)
             return None
+
+    def _cleanup_after_eval(self):
+        if self.backend == "kdiffusion" and self._kdiff_pipe is not None:
+            self._kdiff_pipe = None
+        if torch.cuda.is_available() and self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
 
 def _compute_grad_norm(optimizer) -> float:
