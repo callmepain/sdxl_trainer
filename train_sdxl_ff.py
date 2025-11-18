@@ -215,6 +215,7 @@ class EvalRunner:
         ema_unet=None,
         tb_writer: SummaryWriter | None = None,
         run_name: str | None = None,
+        expected_final_step: int | None = None,
     ) -> None:
         self.pipeline = pipeline
         self.eval_cfg = eval_cfg or {}
@@ -239,6 +240,8 @@ class EvalRunner:
         self._kdiff_pipe = None
         self._scheduler_cache = None
         self._generator_device = self.device if self.device.type != "mps" else torch.device("cpu")
+        self.expected_final_step = expected_final_step
+        self._final_ran = False
 
         self.live_every = None
         self.live_enabled = False
@@ -288,10 +291,16 @@ class EvalRunner:
     def has_work(self) -> bool:
         return bool(self.prompts) and (self.live_enabled or self.final_enabled)
 
-    def maybe_run_live(self, global_step: int) -> None:
+    def maybe_run_live(self, global_step: int, final_pending: bool = False) -> None:
         if not (self.live_enabled and self.prompts):
             return
         if global_step <= 0 or self.live_every is None:
+            return
+        if final_pending:
+            return
+        if self.expected_final_step is not None and global_step >= self.expected_final_step:
+            return
+        if self._final_ran:
             return
         if global_step % self.live_every != 0:
             return
@@ -302,6 +311,7 @@ class EvalRunner:
         if not (self.final_enabled and self.prompts):
             return
         max_batches = self._coerce_int(self.final_cfg.get("max_batches"))
+        self._final_ran = True
         self._run_eval(eval_type="final", step=global_step, max_batches=max_batches)
 
     def _coerce_int(self, value):
@@ -1402,6 +1412,7 @@ if eval_cfg and (eval_cfg.get("live", {}).get("enabled") or eval_cfg.get("final"
         ema_unet=ema_unet,
         tb_writer=tb_writer,
         run_name=run_name,
+        expected_final_step=num_steps,
     )
     if candidate.has_work():
         eval_runner = candidate
@@ -1546,7 +1557,8 @@ def optimizer_step_fn(loss_value, current_step, current_accum):
             ema_unet.restore(unet.parameters())
 
     if eval_runner is not None:
-        eval_runner.maybe_run_live(current_step)
+        final_pending = bool(num_steps is not None and current_step >= num_steps)
+        eval_runner.maybe_run_live(current_step, final_pending=final_pending)
 
     return current_step, current_accum
 
