@@ -145,6 +145,8 @@ DEFAULT_CONFIG = {
         "num_inference_steps": 35,
         "cfg_scale": 6.5,
         "prompts_path": None,
+        "height": None,
+        "width": None,
         "use_ema": True,
         "live": {
             "enabled": False,
@@ -226,6 +228,8 @@ class EvalRunner:
         self.prompts_path = self.eval_cfg.get("prompts_path")
         self.prompts = self._load_prompts(self.prompts_path)
         self.use_ema = bool(self.eval_cfg.get("use_ema", True))
+        self.default_height = self._coerce_resolution_value(self.eval_cfg.get("height"))
+        self.default_width = self._coerce_resolution_value(self.eval_cfg.get("width"))
         self.output_dir = Path(output_dir)
         self.device = torch.device(device)
         self.dtype = dtype
@@ -311,6 +315,59 @@ class EvalRunner:
             return None
         return parsed
 
+    def _coerce_resolution_value(self, value):
+        if value is None:
+            return None
+        token = value
+        if isinstance(token, str):
+            token = token.strip().lower().rstrip("px")
+            if "x" in token or token == "":
+                return None
+        try:
+            parsed = int(float(token))
+        except (TypeError, ValueError):
+            return None
+        if parsed <= 0:
+            return None
+        aligned = int(round(parsed / 8.0) * 8)
+        return max(64, aligned)
+
+    def _parse_resolution_string(self, value):
+        if not value or not isinstance(value, str):
+            return None
+        token = value.lower().replace("px", "").replace(" ", "")
+        if "x" not in token:
+            return None
+        parts = token.split("x", 1)
+        if len(parts) != 2:
+            return None
+        width = self._coerce_resolution_value(parts[0])
+        height = self._coerce_resolution_value(parts[1])
+        if width is None or height is None:
+            return None
+        return width, height
+
+    def _resolve_prompt_resolution(self, entry):
+        width = self._coerce_resolution_value(entry.get("width"))
+        height = self._coerce_resolution_value(entry.get("height"))
+        if (width is None or height is None) and isinstance(entry.get("resolution"), str):
+            parsed = self._parse_resolution_string(entry.get("resolution"))
+            if parsed is not None:
+                width = width or parsed[0]
+                height = height or parsed[1]
+        if (width is None or height is None) and isinstance(entry.get("size"), str):
+            parsed = self._parse_resolution_string(entry.get("size"))
+            if parsed is not None:
+                width = width or parsed[0]
+                height = height or parsed[1]
+        if width is None:
+            width = self.default_width
+        if height is None:
+            height = self.default_height
+        if width is None or height is None:
+            return None, None
+        return height, width
+
     def _run_eval(self, eval_type: str, step: int, max_batches: int | None) -> None:
         selected = self.prompts
         if max_batches is not None:
@@ -334,9 +391,12 @@ class EvalRunner:
         return base
 
     def _log_eval_start(self, eval_type: str, step: int, batch_count: int) -> None:
+        res_info = ""
+        if self.default_width and self.default_height:
+            res_info = f" {self.default_width}x{self.default_height}"
         msg = (
             f"[Eval:{eval_type}] step={step} backend={self.backend} sampler={self.sampler_name or '-'} "
-            f"scheduler={self.scheduler_name or '-'} batches={batch_count}"
+            f"scheduler={self.scheduler_name or '-'}{res_info} batches={batch_count}"
         )
         print(msg)
         if self.tb_writer is not None:
@@ -391,14 +451,19 @@ class EvalRunner:
                 seed = random.randint(0, 2**31 - 1)
             generator.manual_seed(int(seed))
             negative_prompt = entry.get("negative_prompt")
-            result = pipe(
-                prompt=entry["prompt"],
-                negative_prompt=negative_prompt,
-                num_inference_steps=self.num_steps,
-                guidance_scale=self.cfg_scale,
-                generator=generator,
-                output_type="pil",
-            )
+            height, width = self._resolve_prompt_resolution(entry)
+            call_kwargs = {
+                "prompt": entry["prompt"],
+                "negative_prompt": negative_prompt,
+                "num_inference_steps": self.num_steps,
+                "guidance_scale": self.cfg_scale,
+                "generator": generator,
+                "output_type": "pil",
+            }
+            if height is not None and width is not None:
+                call_kwargs["height"] = height
+                call_kwargs["width"] = width
+            result = pipe(**call_kwargs)
             image = result.images[0]
             filename = dest / f"step_{step:06d}_idx_{idx:03d}_seed_{seed}.png"
             image.save(filename)
@@ -418,14 +483,19 @@ class EvalRunner:
                 seed = random.randint(0, 2**31 - 1)
             generator.manual_seed(int(seed))
             negative_prompt = entry.get("negative_prompt")
-            result = kd_pipe(
-                prompt=entry["prompt"],
-                negative_prompt=negative_prompt,
-                num_inference_steps=self.num_steps,
-                guidance_scale=self.cfg_scale,
-                generator=generator,
-                output_type="pil",
-            )
+            height, width = self._resolve_prompt_resolution(entry)
+            call_kwargs = {
+                "prompt": entry["prompt"],
+                "negative_prompt": negative_prompt,
+                "num_inference_steps": self.num_steps,
+                "guidance_scale": self.cfg_scale,
+                "generator": generator,
+                "output_type": "pil",
+            }
+            if height is not None and width is not None:
+                call_kwargs["height"] = height
+                call_kwargs["width"] = width
+            result = kd_pipe(**call_kwargs)
             image = result.images[0]
             filename = dest / f"step_{step:06d}_idx_{idx:03d}_seed_{seed}.png"
             image.save(filename)

@@ -89,6 +89,8 @@
     "num_inference_steps": 35,
     "cfg_scale": 6.5,
     "prompts_path": "./data/eval_prompts.example.json",
+    "height": 1024,
+    "width": 1024,
     "use_ema": true,
     "live": {
       "enabled": false,

@@ -108,7 +108,8 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `half_precision`, `use_safetensors`, `extra_args`: Feineinstellungen für den Konverter
 
 ### `eval`
-- Gemeinsame Felder: `backend` (`diffusers` oder `kdiffusion`), `sampler_name` (z. B. `dpmpp_2m_sde_heun`), `scheduler` (Diffusers-Schedulername oder Shortcuts wie `beta`, `euler`, `lms`), `num_inference_steps`, `cfg_scale`, `prompts_path` (JSON mit `[{"prompt": ..., "negative_prompt": ..., "seed": ...}]`, Beispiel in `data/eval_prompts.example.json`) sowie `use_ema`, um während der Eval temporär EMA-Gewichte auf den UNet zu kopieren.
+- Gemeinsame Felder: `backend` (`diffusers` oder `kdiffusion`), `sampler_name` (z. B. `dpmpp_2m_sde_heun`), `scheduler` (Diffusers-Schedulername oder Shortcuts wie `beta`, `euler`, `lms`), `num_inference_steps`, `cfg_scale`, `prompts_path` (JSON mit `[{"prompt": ..., "negative_prompt": ..., "seed": ..., "height": ..., "width": ...}]`, Beispiel in `data/eval_prompts.example.json`), optionale Default-Auflösung `height`/`width` und `use_ema`, um während der Eval temporär EMA-Gewichte auf den UNet zu kopieren.
+- Pro Prompt können `height`/`width` oder ein `resolution`/`size`-String wie `1024x640` gesetzt werden; sie überschreiben die globalen Defaults.
 - `live`: `enabled`, `every_n_steps` und optional `max_batches`, um pro Zwischen-Eval nur die ersten N Prompts zu rendern. Ergebnisse landen unter `.output/<run>/eval/live/step_<global_step>/`.
 - `final`: aktiviert einen Abschluss-Eval nach dem letzten Trainingstep; optional eigenes `max_batches`. Ausgabe unter `.output/<run>/eval/final/`.
 - Während `run_eval()` werden alle relevanten Module in `eval()` versetzt, `torch.inference_mode()` aktiviert und nach Abschluss der ursprüngliche Train-Zustand wiederhergestellt. TensorBoard erhält einen kurzen Text-Eintrag (`eval/live` bzw. `eval/final`).
