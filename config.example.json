@@ -33,6 +33,11 @@
     "detect_anomaly": true,
     "lr_warmup_steps": 0,
     "seed": null,
+    "lr_scheduler": {
+      "type": "cosine_decay",
+      "warmup_steps": 200,
+      "min_factor": 0.3
+    },
     "tensorboard": {
       "enabled": false,
       "log_dir": null,

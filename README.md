@@ -48,6 +48,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - `max_grad_norm`: Gradient-Clipping pro Optimizer-Step (z. B. 1.0). `null` deaktiviert das Feature.
 - `detect_anomaly`: bricht das Training ab, sobald NaN/Inf im Loss auftauchen.
 - `lr_warmup_steps`: Lineares Warmup der Lernrate über die ersten N Optimizer-Schritte (typisch 100–500).
+- `lr_scheduler`: konfigurierbarer LR-Faktor (`type`: `constant`, `linear_decay`, `cosine_decay`, `warmup_steps`, `min_factor`). Der Faktor wird pro globalem Step berechnet und auf alle Param-Gruppen angewendet (Basis-LR * Faktor). Wird dieser Block nicht gesetzt, bleibt das Verhalten wie bisher (keine Decays; Legacy-Warmup über `lr_warmup_steps`).
 - `ema_update_every`: Wie oft (in Steps) die EMA nach `lr_warmup_steps` aktualisiert wird; Standard 10. Davor bleibt EMA inaktiv.
 - `resume_from`: Pfad zu einem bestehenden Diffusers-Output, dessen Gewichte weitertrainiert werden sollen.
 - `resume_state_path`: Optionaler Pfad zu einer gespeicherten Trainer-State-Datei (`trainer_state.pt`). Wenn nicht gesetzt, wird bei `resume_from` automatisch `<resume_from>/trainer_state.pt` verwendet.
@@ -119,6 +120,7 @@ Alle wichtigen Parameter liegen in `config.json`. Wichtige Gruppen:
 - Min-SNR-gewichtetet Loss (`training.snr_gamma`) reduziert den Einfluss von extrem verrauschten Schritten.
 - `training.max_grad_norm` aktiviert Gradient-Clipping (z. B. 1.0), `training.detect_anomaly` bricht bei NaN/Inf sofort ab.
 - `training.lr_warmup_steps` erlaubt lineares Warmup der Lernrate (empfohlen 100–500 Schritte).
+- `training.lr_scheduler`: neuer Block für skalare LR-Faktoren (`type`: `constant`, `linear_decay`, `cosine_decay`, `warmup_steps`, `min_factor`). Der Faktor wird auf alle Param-Gruppen (UNet/TEs) angewendet; während des Warmups geht er linear von 0 → 1, anschließend entweder konstant oder mit dem gewählten Decay weiter. Wenn der Block fehlt, verhält sich der Trainer wie früher (keine Decays; optionales Legacy-Warmup über `training.lr_warmup_steps`).
 - Beim Start werden – sofern Buckets aktiv sind – die tatsächlichen Bucket-Verteilungen inklusive effektiver Batchgrößen geloggt.
 - Für TensorBoard: `tensorboard --logdir ./logs/tensorboard` starten (oder den in der Config gesetzten Pfad) und im Browser öffnen. Es werden Loss, Lernraten (UNet/Text-Encoder), Grad-Norm (optional), AMP-Scale, Bucket-Verteilung sowie Basis-Metadaten (Effektiv-Batchsize, Anzahl Samples) geloggt.
 

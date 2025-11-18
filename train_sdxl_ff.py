@@ -23,7 +23,6 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 from torch.nn.utils import clip_grad_norm_
-from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from diffusers import (
     AutoencoderKL,
@@ -92,6 +91,11 @@ DEFAULT_CONFIG = {
         "resume_state_path": None,
         "state_path": None,
         "seed": None,
+        "lr_scheduler": {
+            "type": None,
+            "warmup_steps": 0,
+            "min_factor": 0.0,
+        },
         "tensorboard": {
             "enabled": False,
             "log_dir": None,
@@ -581,6 +585,46 @@ class EvalRunner:
             torch.cuda.empty_cache()
 
 
+class LearningRateController:
+    def __init__(self, cfg: dict, total_steps: int | None, param_groups: list[dict]):
+        self.scheduler_type = (cfg.get("type") or "").strip().lower()
+        if self.scheduler_type not in {"constant", "cosine_decay", "linear_decay"}:
+            raise ValueError(f"Unbekannter lr_scheduler.type: {cfg.get('type')}")
+        self.warmup_steps = max(0, int(cfg.get("warmup_steps", 0) or 0))
+        self.min_factor = float(cfg.get("min_factor", 0.0) or 0.0)
+        self.total_steps = int(total_steps) if total_steps is not None else None
+        self.param_groups = param_groups
+        self.last_factor = 1.0
+
+    def compute_factor(self, step: int) -> float:
+        # Warmup (step is zero-indexed, so add 1 like previous behavior)
+        if self.warmup_steps > 0 and step < self.warmup_steps:
+            return max((step + 1) / float(self.warmup_steps), 1e-8)
+
+        if self.scheduler_type == "constant" or self.total_steps is None or self.total_steps <= self.warmup_steps:
+            return 1.0
+
+        progress_steps = max(self.total_steps - self.warmup_steps, 1)
+        progress = min(max(step - self.warmup_steps, 0) / progress_steps, 1.0)
+        min_factor = max(0.0, min(self.min_factor, 1.0))
+
+        if self.scheduler_type == "linear_decay":
+            return max(min_factor, 1.0 - (1.0 - min_factor) * progress)
+
+        if self.scheduler_type == "cosine_decay":
+            cosine = (1 + math.cos(math.pi * progress)) / 2.0  # 1 -> 0
+            return min_factor + (1.0 - min_factor) * cosine
+
+        return 1.0
+
+    def apply(self, optimizer, step: int) -> float:
+        factor = self.compute_factor(step)
+        for group in self.param_groups:
+            optimizer.param_groups[group["idx"]]["lr"] = group["base_lr"] * factor
+        self.last_factor = factor
+        return factor
+
+
 def _compute_grad_norm(optimizer) -> float:
     norms = []
     for group in optimizer.param_groups:
@@ -853,14 +897,12 @@ else:
 resume_state_dict = None
 resume_global_step = 0
 resume_epoch = 0
-resume_lr_scheduler_state = None
 resume_state_active = bool(resume_from_path is not None or resume_state_path_cfg is not None)
 if resume_state_active and resume_state_path is not None and resume_state_path.exists():
     try:
         resume_state_dict = torch.load(resume_state_path, map_location="cpu")
         resume_global_step = int(resume_state_dict.get("global_step", 0) or 0)
         resume_epoch = int(resume_state_dict.get("epoch", 0) or 0)
-        resume_lr_scheduler_state = resume_state_dict.get("lr_scheduler")
         print(
             f"Trainer-State geladen aus {resume_state_path} "
             f"(step={resume_global_step}, epoch={resume_epoch})"
@@ -947,7 +989,6 @@ max_grad_norm = training_cfg.get("max_grad_norm")
 if max_grad_norm is not None:
     max_grad_norm = float(max_grad_norm)
 detect_anomaly = bool(training_cfg.get("detect_anomaly", True))
-lr_warmup_steps = int(training_cfg.get("lr_warmup_steps", 0) or 0)
 ema_update_every = int(training_cfg.get("ema_update_every", 10) or 10)
 if ema_update_every < 1:
     warnings.warn("ema_update_every < 1 ist ungültig – fallback auf 1.", stacklevel=2)
@@ -1273,9 +1314,9 @@ def save_training_state(
     optimizer,
     scaler,
     ema_model,
-    lr_scheduler,
     global_step: int,
     epoch: int,
+    lr_scheduler=None,
 ) -> None:
     state_path = state_path.expanduser()
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1395,19 +1436,38 @@ if resume_state_dict is not None:
         except Exception as exc:
             warnings.warn(f"EMA-Status konnte nicht geladen werden ({exc}).", stacklevel=2)
 
-lr_scheduler = None
-if lr_warmup_steps and lr_warmup_steps > 0:
-    def _lr_warmup_lambda(step: int):
-        if step >= lr_warmup_steps:
-            return 1.0
-        return max((step + 1) / float(lr_warmup_steps), 1e-8)
+lr_scheduler_cfg = training_cfg.get("lr_scheduler") or {}
+if isinstance(lr_scheduler_cfg, dict) and lr_scheduler_cfg.get("type"):
+    active_scheduler_cfg = lr_scheduler_cfg
+else:
+    active_scheduler_cfg = None
 
-    lr_scheduler = LambdaLR(optimizer, lr_lambda=_lr_warmup_lambda)
-if lr_scheduler is not None and resume_lr_scheduler_state is not None:
-    try:
-        lr_scheduler.load_state_dict(resume_lr_scheduler_state)
-    except Exception as exc:
-        warnings.warn(f"LR-Scheduler-Status konnte nicht geladen werden ({exc}).", stacklevel=2)
+legacy_warmup_steps = int(training_cfg.get("lr_warmup_steps", 0) or 0)
+if active_scheduler_cfg is None and legacy_warmup_steps > 0:
+    active_scheduler_cfg = {
+        "type": "constant",
+        "warmup_steps": legacy_warmup_steps,
+        "min_factor": 1.0,
+    }
+
+lr_controller = None
+if active_scheduler_cfg is not None:
+    lr_groups = [
+        {"name": "unet", "idx": 0, "base_lr": lr_unet},
+    ]
+    if train_text_encoder_1 and te1_group_idx is not None:
+        lr_groups.append({"name": "te1", "idx": te1_group_idx, "base_lr": lr_te1})
+    if train_text_encoder_2 and te2_group_idx is not None:
+        lr_groups.append({"name": "te2", "idx": te2_group_idx, "base_lr": lr_te2})
+
+    total_training_steps = num_steps if num_steps is not None else total_progress_steps
+    lr_controller = LearningRateController(active_scheduler_cfg, total_training_steps, lr_groups)
+    print(
+        f"LR Scheduler aktiv: type={lr_controller.scheduler_type} warmup={lr_controller.warmup_steps} "
+        f"min_factor={lr_controller.min_factor}"
+    )
+else:
+    print("LR Scheduler: deaktiviert (konstante Basis-LRs).")
 
 eval_runner = None
 if eval_cfg and (eval_cfg.get("live", {}).get("enabled") or eval_cfg.get("final", {}).get("enabled")):
@@ -1499,11 +1559,14 @@ pbar = tqdm(total=pbar_total, desc="SDXL Training", unit="step", initial=global_
 accum_counter = 0
 last_loss_value = 0.0
 
-ema_start_step = lr_warmup_steps if use_ema else 0
+ema_start_step = lr_controller.warmup_steps if (use_ema and lr_controller is not None) else 0
 
 
 def optimizer_step_fn(loss_value, current_step, current_accum):
     grad_norm_value = None
+    current_lr_factor = None
+    if lr_controller is not None:
+        current_lr_factor = lr_controller.apply(optimizer, current_step)
     need_unscale = ((max_grad_norm is not None and max_grad_norm > 0) or (tb_writer is not None and tb_log_grad_norm))
     if need_unscale:
         scaler.unscale_(optimizer)
@@ -1516,8 +1579,6 @@ def optimizer_step_fn(loss_value, current_step, current_accum):
 
     scaler.step(optimizer)
     scaler.update()
-    if lr_scheduler is not None:
-        lr_scheduler.step()
 
     optimizer.zero_grad(set_to_none=True)
     current_accum = 0
@@ -1534,7 +1595,19 @@ def optimizer_step_fn(loss_value, current_step, current_accum):
     pbar.set_postfix({"loss": f"{display_loss:.4f}"})
 
     if log_every is not None and current_step % log_every == 0:
-        print(f"step {current_step} | loss {display_loss:.4f}")
+        lr_summary = ""
+        if lr_controller is not None:
+            unet_lr = optimizer.param_groups[0]["lr"]
+            lr_parts = [f"unet={unet_lr:.3e}"]
+            if train_text_encoder_1 and te1_group_idx is not None:
+                lr_parts.append(f"te1={optimizer.param_groups[te1_group_idx]['lr']:.3e}")
+            if train_text_encoder_2 and te2_group_idx is not None:
+                lr_parts.append(f"te2={optimizer.param_groups[te2_group_idx]['lr']:.3e}")
+            lr_summary = (
+                f" | lr {'/'.join(lr_parts)}"
+                f" (factor={current_lr_factor or lr_controller.last_factor:.4f}, {lr_controller.scheduler_type})"
+            )
+        print(f"step {current_step} | loss {display_loss:.4f}{lr_summary}")
 
     if tb_writer is not None:
         tb_writer.add_scalar("train/loss", display_loss, current_step)
@@ -1552,6 +1625,8 @@ def optimizer_step_fn(loss_value, current_step, current_accum):
         if tb_log_scaler:
             tb_writer.add_scalar("train/amp_scale", scaler.get_scale(), current_step)
         tb_writer.add_scalar("train/global_step", current_step, current_step)
+        if lr_controller is not None and current_lr_factor is not None:
+            tb_writer.add_scalar("train/lr_factor", current_lr_factor, current_step)
 
     if checkpoint_every is not None and current_step % checkpoint_every == 0:
         if ema_unet is not None:
@@ -1559,7 +1634,7 @@ def optimizer_step_fn(loss_value, current_step, current_accum):
             ema_unet.copy_to(unet.parameters())
 
         pipe.save_pretrained(f"{output_dir}_step_{current_step}")
-        save_training_state(state_save_path, optimizer, scaler, ema_unet, lr_scheduler, current_step, epoch)
+        save_training_state(state_save_path, optimizer, scaler, ema_unet, current_step, epoch, None)
 
         if ema_unet is not None:
             ema_unet.restore(unet.parameters())
@@ -1704,7 +1779,7 @@ if ema_unet is not None:
     ema_unet.copy_to(unet.parameters())
 
 pipe.save_pretrained(output_dir)
-save_training_state(state_save_path, optimizer, scaler, ema_unet, lr_scheduler, global_step, epoch)
+save_training_state(state_save_path, optimizer, scaler, ema_unet, global_step, epoch, None)
 
 if tb_writer is not None:
     tb_writer.flush()
