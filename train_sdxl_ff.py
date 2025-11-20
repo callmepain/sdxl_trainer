@@ -19,6 +19,18 @@ warnings.filterwarnings(
     message="Skipping import of cpp extensions due to incompatible torch version.*",
     category=UserWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    message="pkg_resources is deprecated as an API.*",
+    category=UserWarning,
+    module="pkg_resources",
+)
+warnings.filterwarnings(
+    "ignore",
+    message="Should have ta>=t0 but got ta=.*",
+    category=UserWarning,
+    module="torchsde._brownian.brownian_interval",
+)
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from diffusers import (
@@ -486,13 +498,30 @@ if isinstance(per_bucket_cfg, dict):
 bucket_enabled = bool(bucket_cfg.get("enabled", False))
 bucket_default_batch_size = int(bucket_cfg.get("batch_size") or batch_size) if bucket_enabled else batch_size
 effective_batch = bucket_default_batch_size * grad_accum_steps
+bucket_effective_batches = {
+    key: value * grad_accum_steps for key, value in bucket_batch_size_map.items()
+}
 print("==== Trainingskonfiguration ====")
 print(f"Modell-Quelle: {model_load_path}")
-print(f"Konfiguriertes Batch-Size-Basismaß: {bucket_default_batch_size}{' (Bucket-Default)' if bucket_enabled else ''}")
-if bucket_batch_size_map:
-    print(f"Bucket-spezifische Batchsizes: {bucket_batch_size_map}")
-print(f"Gradient Accumulation Steps: {grad_accum_steps}")
-print(f"Effektive Batchsize (pro Step): {effective_batch}")
+print("Batchsize:")
+print(f"  training.batch_size: {batch_size}")
+if bucket_enabled:
+    print(
+        f"  data.bucket.batch_size (Default für Dataloader): {bucket_default_batch_size}"
+    )
+    if bucket_batch_size_map:
+        print(f"  data.bucket.per_resolution_batch_sizes: {bucket_batch_size_map}")
+else:
+    print("  data.bucket.enabled: False (Dataloader nutzt training.batch_size)")
+print(f"  grad_accum_steps: {grad_accum_steps}")
+if bucket_effective_batches:
+    eff_values = [effective_batch, *bucket_effective_batches.values()]
+    print(
+        f"  effektive Batch/Step: default={effective_batch}, min={min(eff_values)}, max={max(eff_values)}"
+    )
+    print(f"  effektive Batch/Step pro Bucket: {bucket_effective_batches}")
+else:
+    print(f"  effektive Batch/Step: {effective_batch}")
 if min_sigma is not None:
     print(f"Min-Sigma konfiguriert: wert={min_sigma}, warmup_steps={min_sigma_warmup_steps}")
 else:
@@ -610,6 +639,20 @@ def encode_text(captions_batch):
 
 
 VAE_SCALING_FACTOR = 0.18215
+
+
+def _count_parameters(modules):
+    total = 0
+    trainable = 0
+    for module in modules:
+        if module is None:
+            continue
+        for param in module.parameters():
+            numel = param.numel()
+            total += numel
+            if param.requires_grad:
+                trainable += numel
+    return total, trainable
 
 
 def prepare_latents(pixel_values, generator=None):
@@ -764,6 +807,11 @@ te1.requires_grad_(train_text_encoder_1)
 te2.requires_grad_(train_text_encoder_2)
 
 unet.set_attn_processor(FlashAttnProcessor())
+
+param_total, param_trainable = _count_parameters([unet, vae, te1, te2])
+print(
+    f"Parameter gesamt: {param_total:,} | trainierbar: {param_trainable:,}"
+)
 
 
 # 4) Noise-Scheduler (DDPM oder dein Favorit)

@@ -1,22 +1,39 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`train_sdxl_ff.py` is the entrypoint: it loads SDXL backbones, prepares optimizers/logging, and triggers exports. `dataset.py` contains caption-augmented datasets, bucket sampling, and latent caching logic—extend it instead of building custom loaders. `config.json` (and `config.example.json`) define every tunable option; point `data/` to your image + `.txt` caption pairs. Training outputs land in `.output/` and single-file checkpoints in `.output/safetensors/`, while `logs/` holds TensorBoard runs. `PainCraft_XL_Reforged_v1_diffusers/` provides a reference base model, `cache/` stores optional VAE latents, and `flash-attention/` mirrors vendor kernels. Use the existing `venv/` whenever editing or running scripts.
+- `train_sdxl_ff.py`: main entry; loads config, prepares dataset/buckets, runs training, optional EMA, live/final eval, and export.
+- `config*.json` and `config_utils.py`: default values and loader; keep personal settings in `config.json` (ignored). `config_decay.json` and `config.example.json` are reference presets.
+- `dataset.py`: image + caption loader with dropout/shuffle and bucketed batching. Expects images in `data/images` with optional `.txt` captions.
+- `eval_export.py`: evaluation runner; uses prompts from `data/eval_prompts*.json` and writes renders under `.output/<run>/eval/...`.
+- `optim_utils.py`, `state_utils.py`, `converttosdxl.py`, `caption_cleanup.py`: optimizer helpers, checkpoint/state handling, SDXL converter, and caption cleanup CLI. `debug/` holds ad-hoc probes; `.output/`, `cache/`, `logs/`, and large artifacts stay untracked (see `.gitignore`).
 
-## Build, Test, and Development Commands
-- `source venv/bin/activate` – enter the Python 3.12 environment with matching CUDA/BitsAndBytes.
-- `python train_sdxl_ff.py` – run fine-tuning with values from `config.json`; update `run.name`, `data.image_dir`, and `training.*` before launch.
-- `tensorboard --logdir ./logs/tensorboard` – monitor loss, grad norms, AMP scaler, and bucket stats per run.
-- `python converttosdxl.py --model_path .output/<run> --checkpoint_path .output/safetensors/<run>.safetensors --half --use_safetensors` – export a ComfyUI/SDXL-compatible `.safetensors` file.
+## Setup, Build, and Development Commands
+```bash
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+# configure your run
+cp config.example.json config.json  # edit as needed
+python train_sdxl_ff.py             # starts training with config.json
+tensorboard --logdir ./logs/tensorboard  # monitor metrics
+```
+`train_sdxl_ff.py` respects `run.*` and `training.*` paths, writes checkpoints to `.output/<run>/`, and can resume via `training.resume_from` / `resume_state_path`. `converttosdxl.py` converts a diffusers folder to `.safetensors` if invoked directly or via the export block.
 
 ## Coding Style & Naming Conventions
-Stick to idiomatic Python with 4-space indents, snake_case names, and `Path` usage for filesystem work. Follow the helper-heavy structure shown in `train_sdxl_ff.py`: private utilities prefixed with `_`, configuration dictionaries kept in lower_snake_case, and `f`-strings for logging. Type hints are encouraged on new public functions, and loggers or progress bars should leverage `tqdm` and TensorBoard writers already in place.
+- Python 3.12, 4-space indentation, trailing commas where they aid diffs.
+- Prefer `Path` over raw strings for file paths; keep config keys snake_case to match `DEFAULT_CONFIG`.
+- Use type hints where present in helpers; keep functions small and data validation explicit (see `_coerce_*` helpers).
+- Avoid printing inside hot loops; rely on `tqdm`, logging, or `warnings.warn` patterns used in the trainer.
 
 ## Testing Guidelines
-There is no pytest suite; rely on controlled runs. For code changes, execute a smoke job (`training.num_steps=50`, `batch_size=1`) to verify logging, checkpoint export, and EMA handling. When touching data pipelines, run with `data.bucket.enabled=true` to confirm bucket histograms appear and latent caches build without errors. Converter updates should be validated by re-running `converttosdxl.py` on a known `.output/<run>` folder and loading the result in ComfyUI or `StableDiffusionXLPipeline.from_single_file`.
+- No formal test suite. Do a smoke run with small numbers (`training.num_steps=50`, lower batch size) before longer jobs.
+- Enable live eval (`eval.live.enabled=true`) with a tiny prompt set to verify sampler settings; confirm outputs under `.output/<run>/eval/live/`.
+- For dataset issues, run `caption_cleanup.py --help` or inspect `debug/` scripts; ensure TensorBoard logs populate when modifying logging code.
 
 ## Commit & Pull Request Guidelines
-History favors short, imperative subjects (`tensorboard`, `vae latent caching`). PRs must explain motivation, summarize config keys touched, and state the validation you ran (TensorBoard link, sample renders such as `test.png`). Reference related issues or experiments and mention GPU/driver requirements when they change so reviewers can reproduce quickly.
+- Git history favors short, imperative, lower-case titles (e.g., `new structure`, `gitignore`); keep commits scoped.
+- PRs should include: brief summary, key config deltas, commands run (`python train_sdxl_ff.py`, `tensorboard`), and links/paths to produced outputs or eval renders.
+- If changing training defaults or export behavior, note backward-compatibility and whether existing checkpoints remain usable.
 
-## Security & Configuration Tips
-Do not commit personal datasets, HF tokens, or generated checkpoints. Scrub `config.json` paths and keep `.output/`, `cache/`, and `logs/` gitignored. When enabling FlashAttention or BF16, document the minimum driver/CUDA requirements in your PR description so other contributors can match the environment safely.
+## Security & Data Handling
+- Do not commit model weights, generated images, or private datasets (`data/`, `.output/`, `.safetensors`, `.ckpt` are ignored). Keep access tokens in env vars, not files.
+- Validate paths before launching long runs to avoid overwriting prior experiments; prefer unique `run.name` values per experiment.
