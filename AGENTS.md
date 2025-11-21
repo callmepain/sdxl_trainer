@@ -37,3 +37,10 @@ tensorboard --logdir ./logs/tensorboard  # monitor metrics
 ## Security & Data Handling
 - Do not commit model weights, generated images, or private datasets (`data/`, `.output/`, `.safetensors`, `.ckpt` are ignored). Keep access tokens in env vars, not files.
 - Validate paths before launching long runs to avoid overwriting prior experiments; prefer unique `run.name` values per experiment.
+
+## System used for training
+- AMD Threadripper 9960x 24 cores 48 threads
+- 64 gb ddr5 ecc ram
+- NVME ssd's pcie x4 gen 4
+- 1x Geforce RTX 5090 32gb vram
+- 1x Geforce GTX 1080 11gb vram (used for desktop)

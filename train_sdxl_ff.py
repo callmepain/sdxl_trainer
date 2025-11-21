@@ -31,7 +31,6 @@ warnings.filterwarnings(
     category=UserWarning,
     module="torchsde._brownian.brownian_interval",
 )
-from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from diffusers import (
     AutoencoderKL,
@@ -55,56 +54,22 @@ from transformers import AutoTokenizer
 from tqdm.auto import tqdm
 from dataset import BucketBatchSampler, SimpleCaptionDataset
 from config_utils import load_config
-from eval_export import EvalRunner, export_single_file
-from optim_utils import LearningRateController, compute_grad_norm
-from state_utils import save_training_state
+from eval_export import EvalRunner
+from optim_utils import LearningRateController
+from training.trainer import (
+    BucketState,
+    ResumeState,
+    TrainerIO,
+    TrainerModules,
+    TrainingLoopSettings,
+    TrainingPaths,
+    run_training_loop,
+)
+from training.bucket_utils import bucket_key_from_target_size, bucket_sort_key, normalize_bucket_key
+from training.min_sigma import MinSigmaController
 
 
 CONFIG_PATH = Path("config.json")
-
-
-def _normalize_bucket_key(value):
-    if isinstance(value, str):
-        token = value.strip().lower().replace(" ", "")
-        if "x" in token:
-            parts = token.split("x")
-            if len(parts) == 2 and all(part.isdigit() for part in parts):
-                return f"{int(parts[0])}x{int(parts[1])}"
-        return token
-    if isinstance(value, (tuple, list)) and len(value) == 2:
-        try:
-            return f"{int(value[0])}x{int(value[1])}"
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _bucket_sort_key(value: str):
-    try:
-        cleaned = value.strip().lower().replace(" ", "")
-        if "x" in cleaned:
-            w, h = cleaned.split("x")
-            return int(w), int(h)
-    except Exception:
-        pass
-    return (float("inf"), value)
-
-
-def _bucket_key_from_target_size(target_size):
-    if target_size is None:
-        return None
-    try:
-        if target_size.ndim == 2:
-            height = int(target_size[0, 0])
-            width = int(target_size[0, 1])
-        elif target_size.ndim == 1 and target_size.numel() >= 2:
-            height = int(target_size[0])
-            width = int(target_size[1])
-        else:
-            return None
-    except Exception:
-        return None
-    return _normalize_bucket_key((width, height))
 
 
 cfg = load_config(CONFIG_PATH)
@@ -543,7 +508,7 @@ per_bucket_cfg = bucket_cfg.get("per_resolution_batch_sizes") or {}
 bucket_batch_size_map = {}
 if isinstance(per_bucket_cfg, dict):
     for raw_key, raw_value in per_bucket_cfg.items():
-        normalized = _normalize_bucket_key(raw_key)
+        normalized = normalize_bucket_key(raw_key)
         if not normalized:
             continue
         try:
@@ -620,8 +585,8 @@ if bucket_enabled:
     bucket_counts = Counter(train_dataset.sample_buckets)
     if bucket_counts:
         print("Bucket-Verteilung:")
-        for key in sorted(bucket_counts.keys(), key=_bucket_sort_key):
-            normalized_key = _normalize_bucket_key(key) or key
+        for key in sorted(bucket_counts.keys(), key=bucket_sort_key):
+            normalized_key = normalize_bucket_key(key) or key
             effective_size = bucket_batch_size_map.get(normalized_key, bucket_default_batch_size)
             print(f"  {key}: {bucket_counts[key]} samples (batch_size={effective_size})")
             if tb_writer is not None:
@@ -1055,270 +1020,79 @@ elif min_sigma is not None:
 
 # 9) Training Loop
 
-scaler = torch.amp.GradScaler("cuda", enabled=not use_bf16)
-if resume_state_dict is not None:
-    scaler_state = resume_state_dict.get("scaler")
-    if scaler_state is not None:
-        try:
-            scaler.load_state_dict(scaler_state)
-        except Exception as exc:
-            warnings.warn(f"AMP-Scaler konnte nicht geladen werden ({exc}).", stacklevel=2)
+trainer_modules = TrainerModules(
+    pipe=pipe,
+    unet=unet,
+    te1=te1,
+    te2=te2,
+    optimizer=optimizer,
+    lr_controller=lr_controller,
+    ema_unet=ema_unet,
+)
 
-global_step = resume_global_step
-unet.train()
-if train_text_encoder_1:
-    te1.train()
-else:
-    te1.eval()
-if train_text_encoder_2:
-    te2.train()
-else:
-    te2.eval()
+trainer_io = TrainerIO(
+    train_loader=train_loader,
+    encode_text=encode_text,
+    prepare_latents=prepare_latents,
+)
 
-optimizer.zero_grad(set_to_none=True)
+trainer_settings = TrainingLoopSettings(
+    device=device,
+    dtype=dtype,
+    use_bf16=use_bf16,
+    use_ema=use_ema,
+    train_text_encoder_1=train_text_encoder_1,
+    train_text_encoder_2=train_text_encoder_2,
+    grad_accum_steps=grad_accum_steps,
+    log_every=log_every,
+    checkpoint_every=checkpoint_every,
+    noise_offset=noise_offset,
+    snr_gamma=snr_gamma,
+    max_grad_norm=max_grad_norm,
+    detect_anomaly=detect_anomaly,
+    ema_update_every=ema_update_every,
+    num_steps=num_steps,
+    num_epochs=num_epochs,
+    total_progress_steps=total_progress_steps,
+    data_size=data_cfg["size"],
+    tb_log_grad_norm=tb_log_grad_norm,
+    tb_log_scaler=tb_log_scaler,
+    batch_size=batch_size,
+    prediction_type=prediction_type,
+)
 
-pbar_total = total_progress_steps
-if pbar_total is not None and global_step > pbar_total:
-    pbar_total = global_step
-pbar = tqdm(total=pbar_total, desc="SDXL Training", unit="step", initial=global_step)
-accum_counter = 0
-last_loss_value = 0.0
-last_bucket_key = None
+trainer_paths = TrainingPaths(
+    output_dir=output_dir,
+    state_save_path=state_save_path,
+)
 
-ema_start_step = lr_controller.warmup_steps if (use_ema and lr_controller is not None) else 0
+trainer_resume = ResumeState(
+    state_dict=resume_state_dict,
+    global_step=resume_global_step,
+    epoch=resume_epoch,
+)
 
+trainer_bucket_state = BucketState(
+    enabled=bucket_enabled,
+    default_batch_size=bucket_default_batch_size,
+    batch_size_map=bucket_batch_size_map,
+    log_switches=bucket_log_switches,
+)
 
-def optimizer_step_fn(loss_value, current_step, current_accum):
-    grad_norm_value = None
-    current_lr_factor = None
-    if lr_controller is not None:
-        current_lr_factor = lr_controller.apply(optimizer, current_step)
-    need_unscale = ((max_grad_norm is not None and max_grad_norm > 0) or (tb_writer is not None and tb_log_grad_norm))
-    if need_unscale:
-        scaler.unscale_(optimizer)
-        if tb_writer is not None and tb_log_grad_norm:
-            grad_norm_value = compute_grad_norm(optimizer)
-        if max_grad_norm is not None and max_grad_norm > 0:
-            params_to_clip = [p for group in optimizer.param_groups for p in group["params"] if p.grad is not None]
-            if params_to_clip:
-                clip_grad_norm_(params_to_clip, max_norm=max_grad_norm)
-
-    scaler.step(optimizer)
-    scaler.update()
-
-    optimizer.zero_grad(set_to_none=True)
-    current_accum = 0
-
-    ema_updated = False
-    if ema_unet is not None and current_step >= ema_start_step:
-        if (current_step - ema_start_step) % ema_update_every == 0:
-            ema_unet.step(unet.parameters())
-            ema_updated = True
-
-    current_step += 1
-    display_loss = float(loss_value) if loss_value is not None else 0.0
-    pbar.update(1)
-    pbar.set_postfix({"loss": f"{display_loss:.4f}"})
-
-    if log_every is not None and current_step % log_every == 0:
-        lr_summary = ""
-        if lr_controller is not None:
-            unet_lr = optimizer.param_groups[0]["lr"]
-            lr_parts = [f"unet={unet_lr:.3e}"]
-            if train_text_encoder_1 and te1_group_idx is not None:
-                lr_parts.append(f"te1={optimizer.param_groups[te1_group_idx]['lr']:.3e}")
-            if train_text_encoder_2 and te2_group_idx is not None:
-                lr_parts.append(f"te2={optimizer.param_groups[te2_group_idx]['lr']:.3e}")
-            lr_summary = (
-                f" | lr {'/'.join(lr_parts)}"
-                f" (factor={current_lr_factor or lr_controller.last_factor:.4f}, {lr_controller.scheduler_type})"
-            )
-        print(f"step {current_step} | loss {display_loss:.4f}{lr_summary}")
-
-    if tb_writer is not None:
-        tb_writer.add_scalar("train/loss", display_loss, current_step)
-        tb_writer.add_scalar("train/lr_unet", optimizer.param_groups[0]["lr"], current_step)
-        if train_text_encoder_1 and te1_group_idx is not None:
-            tb_writer.add_scalar(
-                "train/lr_text_encoder_1", optimizer.param_groups[te1_group_idx]["lr"], current_step
-            )
-        if train_text_encoder_2 and te2_group_idx is not None:
-            tb_writer.add_scalar(
-                "train/lr_text_encoder_2", optimizer.param_groups[te2_group_idx]["lr"], current_step
-            )
-        if grad_norm_value is not None:
-            tb_writer.add_scalar("train/grad_norm", grad_norm_value, current_step)
-        if tb_log_scaler:
-            tb_writer.add_scalar("train/amp_scale", scaler.get_scale(), current_step)
-        tb_writer.add_scalar("train/global_step", current_step, current_step)
-        if lr_controller is not None and current_lr_factor is not None:
-            tb_writer.add_scalar("train/lr_factor", current_lr_factor, current_step)
-
-    if checkpoint_every is not None and current_step % checkpoint_every == 0:
-        if ema_unet is not None:
-            ema_unet.store(unet.parameters())
-            ema_unet.copy_to(unet.parameters())
-
-        pipe.save_pretrained(f"{output_dir}_step_{current_step}")
-        save_training_state(state_save_path, optimizer, scaler, ema_unet, current_step, epoch, None)
-
-        if ema_unet is not None:
-            ema_unet.restore(unet.parameters())
-
-    if eval_runner is not None:
-        final_pending = bool(num_steps is not None and current_step >= num_steps)
-        eval_runner.maybe_run_live(current_step, final_pending=final_pending)
-
-    return current_step, current_accum
-
-epoch = resume_epoch
-while True:
-    if num_epochs is not None and epoch >= num_epochs:
-        break
-
-    for batch in train_loader:
-        if num_steps is not None and global_step >= num_steps:
-            break
-
-        if bucket_log_switches:
-            bucket_key = _bucket_key_from_target_size(batch.get("target_size"))
-            if bucket_key is not None and bucket_key != last_bucket_key:
-                effective_bucket_batch = (
-                    bucket_batch_size_map.get(bucket_key, bucket_default_batch_size if bucket_enabled else batch_size)
-                )
-                print(f"Bucket aktiv: {bucket_key} (batch_size={effective_bucket_batch}, step={global_step})")
-                last_bucket_key = bucket_key
-
-        with torch.amp.autocast("cuda", dtype=dtype, enabled=not use_bf16):
-            # Images -> Latents
-            latents = batch.get("latents")
-            if latents is not None:
-                latents = latents.to(device=device, dtype=dtype)
-            else:
-                pixel_values = batch["pixel_values"]
-                latents = prepare_latents(pixel_values)
-
-            # Noise + Timesteps
-            noise = torch.randn_like(latents)
-            if noise_offset > 0:
-                noise = noise + noise_offset * torch.randn(
-                    (noise.shape[0], noise.shape[1], 1, 1),
-                    device=device,
-                    dtype=noise.dtype,
-                )
-            timesteps = torch.randint(
-                0,
-                noise_scheduler.config.num_train_timesteps,
-                (latents.shape[0],),
-                device=device,
-                dtype=torch.long,
-            )
-            sigma_original, sigma_effective = enforce_min_sigma(timesteps, global_step)
-            sigma_for_loss = sigma_effective if sigma_effective is not None else sigma_original
-            if tb_writer is not None and sigma_original is not None:
-                tb_writer.add_scalar("train/sigma/original", sigma_original.mean().item(), global_step)
-                if sigma_effective is not None:
-                    tb_writer.add_scalar("train/sigma/effective", sigma_effective.mean().item(), global_step)
-
-            noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-
-            # Text-Encodings
-            prompt_embeds, pooled_embeds = encode_text(batch)
-
-            # UNet-Forward
-            target_sizes = batch.get("target_size")
-            if target_sizes is not None:
-                target_sizes = target_sizes.to(device=device)
-                heights = target_sizes[:, 0].to(pooled_embeds.dtype)
-                widths = target_sizes[:, 1].to(pooled_embeds.dtype)
-            else:
-                widths = torch.full(
-                    (latents.shape[0],),
-                    data_cfg["size"],
-                    device=device,
-                    dtype=pooled_embeds.dtype,
-                )
-                heights = widths
-            zeros = torch.zeros_like(widths)
-            add_time_ids = torch.stack(
-                [widths, heights, zeros, zeros, widths, heights],
-                dim=1,
-            )
-
-            model_pred = unet(
-                noisy_latents,
-                timesteps,
-                encoder_hidden_states=prompt_embeds,
-                added_cond_kwargs={"text_embeds": pooled_embeds, "time_ids": add_time_ids},
-            ).sample
-
-            if prediction_type == "v_prediction":
-                target = noise_scheduler.get_velocity(latents, noise, timesteps)
-            elif prediction_type == "sample":
-                target = latents
-            else:
-                target = noise
-
-            loss_dims = tuple(range(1, model_pred.ndim))
-            per_example_loss = torch.mean((model_pred.float() - target.float()) ** 2, dim=loss_dims)
-
-            if snr_gamma is not None and prediction_type in ("epsilon", "v_prediction"):
-                if sigma_for_loss is not None:
-                    sigma_vals = sigma_for_loss.to(per_example_loss.dtype)
-                    snr_vals = 1.0 / torch.clamp(sigma_vals ** 2, min=1e-8)
-                else:
-                    alphas_now = alphas_cumprod_tensor.index_select(0, timesteps).to(per_example_loss.dtype)
-                    snr_vals = alphas_now / torch.clamp(1 - alphas_now, min=1e-8)
-                gamma_tensor = torch.full_like(snr_vals, snr_gamma)
-                snr_weights = torch.minimum(snr_vals, gamma_tensor) / torch.clamp(snr_vals, min=1e-8)
-                per_example_loss = per_example_loss * snr_weights
-
-            raw_loss = per_example_loss.mean()
-
-            if detect_anomaly and not torch.isfinite(raw_loss):
-                raise FloatingPointError(
-                    f"Non-finite loss detected at global_step={global_step}, timestep_mean={timesteps.float().mean().item():.2f}"
-                )
-
-            loss = raw_loss / grad_accum_steps
-
-        last_loss_value = raw_loss.item()
-        scaler.scale(loss).backward()
-        accum_counter += 1
-
-        if accum_counter % grad_accum_steps == 0:
-            global_step, accum_counter = optimizer_step_fn(last_loss_value, global_step, accum_counter)
-
-            if num_steps is not None and global_step >= num_steps:
-                break
-
-    if num_steps is not None and global_step >= num_steps:
-        break
-
-    if accum_counter > 0 and (num_steps is None or global_step < num_steps):
-        global_step, accum_counter = optimizer_step_fn(last_loss_value, global_step, accum_counter)
-
-        if num_steps is not None and global_step >= num_steps:
-            break
-
-    epoch += 1
-
-pbar.close()
-
-if eval_runner is not None:
-    eval_runner.run_final(global_step)
-
-# Final Save (mit EMA-Gewichten, falls vorhanden)
-if ema_unet is not None:
-    ema_unet.store(unet.parameters())
-    ema_unet.copy_to(unet.parameters())
-
-pipe.save_pretrained(output_dir)
-save_training_state(state_save_path, optimizer, scaler, ema_unet, global_step, epoch, None)
-
-if tb_writer is not None:
-    tb_writer.flush()
-    tb_writer.close()
-
-
-export_single_file(Path(output_dir), export_cfg)
+trainer_result = run_training_loop(
+    modules=trainer_modules,
+    io=trainer_io,
+    settings=trainer_settings,
+    paths=trainer_paths,
+    resume_state=trainer_resume,
+    alphas_cumprod_tensor=alphas_cumprod_tensor,
+    noise_scheduler=noise_scheduler,
+    enforce_min_sigma=enforce_min_sigma,
+    bucket_state=trainer_bucket_state,
+    eval_runner=eval_runner,
+    tb_writer=tb_writer,
+    bucket_key_fn=bucket_key_from_target_size,
+    te1_group_idx=te1_group_idx,
+    te2_group_idx=te2_group_idx,
+    export_cfg=export_cfg,
+)
