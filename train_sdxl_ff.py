@@ -90,6 +90,23 @@ def _bucket_sort_key(value: str):
     return (float("inf"), value)
 
 
+def _bucket_key_from_target_size(target_size):
+    if target_size is None:
+        return None
+    try:
+        if target_size.ndim == 2:
+            height = int(target_size[0, 0])
+            width = int(target_size[0, 1])
+        elif target_size.ndim == 1 and target_size.numel() >= 2:
+            height = int(target_size[0])
+            width = int(target_size[1])
+        else:
+            return None
+    except Exception:
+        return None
+    return _normalize_bucket_key((width, height))
+
+
 cfg = load_config(CONFIG_PATH)
 
 flash_attn_func = None
@@ -448,6 +465,44 @@ else:
     export_cfg["checkpoint_path"] = checkpoint_path
 
 dtype = torch.bfloat16 if use_bf16 else torch.float16
+vae_dtype = torch.float32
+
+
+def _format_dtype(value):
+    if value is None:
+        return "unknown"
+    if value == torch.bfloat16:
+        return "bfloat16"
+    if value == torch.float16:
+        return "float16"
+    if value == torch.float32:
+        return "float32"
+    return str(value)
+
+
+def _module_dtype(module):
+    if module is None:
+        return None
+    for param in module.parameters():
+        return param.dtype
+    for buffer in module.buffers():
+        return buffer.dtype
+    return None
+
+
+def _wrap_vae_decode_for_dtype(vae_module, target_dtype):
+    if vae_module is None or target_dtype is None:
+        return
+    if getattr(vae_module, "_decode_wrapped_for_dtype", False):
+        return
+    original_decode = vae_module.decode
+
+    def decode_with_cast(latents, *args, **kwargs):
+        latents = latents.to(dtype=target_dtype)
+        return original_decode(latents, *args, **kwargs)
+
+    vae_module.decode = decode_with_cast
+    vae_module._decode_wrapped_for_dtype = True
 
 seed_value = training_cfg.get("seed")
 if seed_value is not None:
@@ -483,6 +538,7 @@ caption_shuffle_separator = data_cfg.get("caption_shuffle_separator", ",")
 caption_shuffle_min_tokens = data_cfg.get("caption_shuffle_min_tokens", 2)
 bucket_cfg = data_cfg.get("bucket", {})
 latent_cache_cfg = data_cfg.get("latent_cache", {})
+bucket_log_switches = bool(bucket_cfg.get("log_switches", False))
 per_bucket_cfg = bucket_cfg.get("per_resolution_batch_sizes") or {}
 bucket_batch_size_map = {}
 if isinstance(per_bucket_cfg, dict):
@@ -501,41 +557,44 @@ effective_batch = bucket_default_batch_size * grad_accum_steps
 bucket_effective_batches = {
     key: value * grad_accum_steps for key, value in bucket_batch_size_map.items()
 }
-print("==== Trainingskonfiguration ====")
-print(f"Modell-Quelle: {model_load_path}")
-print("Batchsize:")
-print(f"  training.batch_size: {batch_size}")
-if bucket_enabled:
-    print(
-        f"  data.bucket.batch_size (Default für Dataloader): {bucket_default_batch_size}"
-    )
-    if bucket_batch_size_map:
-        print(f"  data.bucket.per_resolution_batch_sizes: {bucket_batch_size_map}")
-else:
-    print("  data.bucket.enabled: False (Dataloader nutzt training.batch_size)")
-print(f"  grad_accum_steps: {grad_accum_steps}")
+run_summary = []
+run_summary.append(("batch.effective_default", effective_batch))
 if bucket_effective_batches:
+    run_summary.append(("batch.effective_buckets", bucket_effective_batches))
     eff_values = [effective_batch, *bucket_effective_batches.values()]
-    print(
-        f"  effektive Batch/Step: default={effective_batch}, min={min(eff_values)}, max={max(eff_values)}"
+    run_summary.append(("batch.effective_range", {"min": min(eff_values), "max": max(eff_values)}))
+run_summary.append(("batch.grad_accum_steps", grad_accum_steps))
+run_summary.append(("batch.training", batch_size))
+run_summary.append(("bucket.enabled", bucket_enabled))
+if bucket_enabled:
+    run_summary.append(("bucket.batch_size_default", bucket_default_batch_size))
+    if bucket_batch_size_map:
+        run_summary.append(("bucket.per_resolution_batch_sizes", bucket_batch_size_map))
+run_summary.append(("bucket.log_switches", bucket_log_switches))
+min_sigma_summary = (
+    f"{min_sigma} (warmup_steps={min_sigma_warmup_steps})" if min_sigma is not None else "deaktiviert"
+)
+run_summary.append(("device", device))
+run_summary.append(("dtype.train", _format_dtype(dtype)))
+run_summary.append(("min_sigma", min_sigma_summary))
+run_summary.append(("model.id", model_load_path))
+run_summary.append(("run.name", run_name or "n/a"))
+run_summary.append(
+    (
+        "text_encoder.1",
+        "train" + (f" (lr={lr_te1})" if train_text_encoder_1 else ""),
     )
-    print(f"  effektive Batch/Step pro Bucket: {bucket_effective_batches}")
-else:
-    print(f"  effektive Batch/Step: {effective_batch}")
-if min_sigma is not None:
-    print(f"Min-Sigma konfiguriert: wert={min_sigma}, warmup_steps={min_sigma_warmup_steps}")
-else:
-    print("Min-Sigma deaktiviert.")
-print("Text-Encoder Training:")
-print(
-    f"  Encoder 1: {'train' if train_text_encoder_1 else 'frozen'}"
-    f"{f' (lr={lr_te1})' if train_text_encoder_1 else ''}"
+    if train_text_encoder_1
+    else ("text_encoder.1", "frozen"),
 )
-print(
-    f"  Encoder 2: {'train' if train_text_encoder_2 else 'frozen'}"
-    f"{f' (lr={lr_te2})' if train_text_encoder_2 else ''}"
+run_summary.append(
+    (
+        "text_encoder.2",
+        "train" + (f" (lr={lr_te2})" if train_text_encoder_2 else ""),
+    )
+    if train_text_encoder_2
+    else ("text_encoder.2", "frozen"),
 )
-print("================================")
 if tb_writer is not None:
     tb_writer.add_scalar("data/effective_batch", effective_batch, 0)
     tb_writer.add_scalar("data/grad_accum_steps", grad_accum_steps, 0)
@@ -552,7 +611,7 @@ train_dataset = SimpleCaptionDataset(
     caption_shuffle_min_tokens=caption_shuffle_min_tokens,
     bucket_config=bucket_cfg,
     latent_cache_config=latent_cache_cfg,
-    pixel_dtype=dtype,
+    pixel_dtype=vae_dtype,
 )
 if tb_writer is not None:
     tb_writer.add_scalar("data/num_samples", len(train_dataset), 0)
@@ -656,12 +715,12 @@ def _count_parameters(modules):
 
 
 def prepare_latents(pixel_values, generator=None):
-    pixel_values = pixel_values.to(device=device, dtype=dtype)
+    pixel_values = pixel_values.to(device=device, dtype=vae_dtype)
     # VAE encode
     with torch.no_grad():
         posterior = vae.encode(pixel_values).latent_dist
         latents = posterior.sample(generator=generator) * VAE_SCALING_FACTOR
-    return latents
+    return latents.to(dtype=dtype)
 
 
 def _resolve_cache_dtype(value, default_dtype):
@@ -698,8 +757,8 @@ def ensure_latent_cache(dataset, cache_cfg):
     total = len(missing)
     print(f"Latent-Cache: Generiere {total} Einträge in {dataset.latent_cache_dir} ...")
 
-    vae_local = AutoencoderKL.from_pretrained(model_load_path, subfolder="vae", torch_dtype=dtype)
-    vae_local.to(device)
+    vae_local = AutoencoderKL.from_pretrained(model_load_path, subfolder="vae", torch_dtype=vae_dtype)
+    vae_local.to(device=device, dtype=vae_dtype)
     vae_local.eval()
     cache_scaling_factor = getattr(getattr(vae_local, "config", None), "scaling_factor", 0.18215)
 
@@ -725,7 +784,7 @@ def ensure_latent_cache(dataset, cache_cfg):
                 pixel_tensors = [
                     dataset.load_image_tensor_for_cache(idx) for idx in batch_indices
                 ]
-                pixel_batch = torch.stack(pixel_tensors).to(device=device, dtype=dtype)
+                pixel_batch = torch.stack(pixel_tensors).to(device=device, dtype=vae_dtype)
                 latents_batch = build_latents(pixel_batch)
                 latents_batch = latents_batch.to(cache_dtype).cpu()
                 for idx, latent_tensor in zip(batch_indices, latents_batch):
@@ -745,6 +804,13 @@ def ensure_latent_cache(dataset, cache_cfg):
 
 if latent_cache_cfg.get("enabled", False):
     ensure_latent_cache(train_dataset, latent_cache_cfg)
+
+cache_dtype_resolved = _resolve_cache_dtype(latent_cache_cfg.get("dtype"), dtype)
+run_summary.append(("latent_cache.enabled", train_dataset.latent_cache_enabled))
+if train_dataset.latent_cache_enabled:
+    run_summary.append(("latent_cache.dtype", _format_dtype(cache_dtype_resolved)))
+    if train_dataset.latent_cache_dir is not None:
+        run_summary.append(("latent_cache.dir", str(train_dataset.latent_cache_dir)))
 
 
 def _move_ema_to_device(ema_model, device):
@@ -771,12 +837,24 @@ pipe = StableDiffusionXLPipeline.from_pretrained(
     torch_dtype=dtype,
     use_safetensors=True,
 )
-pipe.to(device)
 
 unet = pipe.unet
 vae = pipe.vae
 te1 = pipe.text_encoder
 te2 = pipe.text_encoder_2
+
+pipe.to(device)
+unet = unet.to(device=device, dtype=dtype)
+te1 = te1.to(device=device, dtype=dtype)
+te2 = te2.to(device=device, dtype=dtype)
+vae = vae.to(device=device, dtype=vae_dtype)
+pipe.vae = vae
+_wrap_vae_decode_for_dtype(vae, vae_dtype)
+
+run_summary.append(("dtype.te1", _format_dtype(_module_dtype(te1))))
+run_summary.append(("dtype.te2", _format_dtype(_module_dtype(te2))))
+run_summary.append(("dtype.unet", _format_dtype(_module_dtype(unet))))
+run_summary.append(("dtype.vae", _format_dtype(_module_dtype(vae))))
 
 vae_scaling_factor = getattr(getattr(vae, "config", None), "scaling_factor", None)
 if vae_scaling_factor is not None:
@@ -809,9 +887,8 @@ te2.requires_grad_(train_text_encoder_2)
 unet.set_attn_processor(FlashAttnProcessor())
 
 param_total, param_trainable = _count_parameters([unet, vae, te1, te2])
-print(
-    f"Parameter gesamt: {param_total:,} | trainierbar: {param_trainable:,}"
-)
+run_summary.append(("parameters.total", f"{param_total:,}"))
+run_summary.append(("parameters.trainable", f"{param_trainable:,}"))
 
 
 # 4) Noise-Scheduler (DDPM oder dein Favorit)
@@ -819,10 +896,13 @@ noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
 if prediction_type_override:
     noise_scheduler.register_to_config(prediction_type=prediction_type_override)
 prediction_type = noise_scheduler.config.prediction_type
-print(
-    f"Prediction type aktiv: {prediction_type}"
-    f"{' (override aus config)' if prediction_type_override else ' (aus Modellkonfiguration)'}"
-)
+prediction_source = "override" if prediction_type_override else "model_config"
+run_summary.append(("prediction.type", f"{prediction_type} ({prediction_source})"))
+
+print("==== Trainingskonfiguration ====")
+for label, value in sorted(run_summary, key=lambda x: x[0]):
+    print(f"{label}: {value}")
+print("================================")
 
 alphas_cumprod_tensor = noise_scheduler.alphas_cumprod.to(device=device)
 
@@ -1003,6 +1083,7 @@ if pbar_total is not None and global_step > pbar_total:
 pbar = tqdm(total=pbar_total, desc="SDXL Training", unit="step", initial=global_step)
 accum_counter = 0
 last_loss_value = 0.0
+last_bucket_key = None
 
 ema_start_step = lr_controller.warmup_steps if (use_ema and lr_controller is not None) else 0
 
@@ -1098,6 +1179,15 @@ while True:
     for batch in train_loader:
         if num_steps is not None and global_step >= num_steps:
             break
+
+        if bucket_log_switches:
+            bucket_key = _bucket_key_from_target_size(batch.get("target_size"))
+            if bucket_key is not None and bucket_key != last_bucket_key:
+                effective_bucket_batch = (
+                    bucket_batch_size_map.get(bucket_key, bucket_default_batch_size if bucket_enabled else batch_size)
+                )
+                print(f"Bucket aktiv: {bucket_key} (batch_size={effective_bucket_batch}, step={global_step})")
+                last_bucket_key = bucket_key
 
         with torch.amp.autocast("cuda", dtype=dtype, enabled=not use_bf16):
             # Images -> Latents

@@ -73,7 +73,8 @@
         "832x1216": 4,
         "1216x832": 4,
         "1024x1024": 4
-      }
+      },
+      "log_switches": false
     },
     "latent_cache": {
       "enabled": true,

@@ -78,6 +78,7 @@ DEFAULT_CONFIG = {
             "batch_size": None,
             "drop_last": True,
             "per_resolution_batch_sizes": {},
+            "log_switches": False,
         },
         "latent_cache": {
             "enabled": False,

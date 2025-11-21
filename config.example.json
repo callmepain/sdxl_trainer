@@ -64,7 +64,8 @@
       "divisible_by": 64,
       "batch_size": null,
       "drop_last": true,
-      "per_resolution_batch_sizes": {}
+      "per_resolution_batch_sizes": {},
+      "log_switches": false
     },
     "latent_cache": {
       "enabled": false,
