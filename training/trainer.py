@@ -99,7 +99,7 @@ def run_training_loop(
     te1_group_idx: Optional[int] = None,
     te2_group_idx: Optional[int] = None,
     export_cfg: Optional[Dict[str, Any]] = None,
-) -> TrainerResult:
+    ) -> TrainerResult:
     bucket_key_fn = bucket_key_fn or (lambda _: None)
 
     scaler = torch.amp.GradScaler("cuda", enabled=not settings.use_bf16)
@@ -140,8 +140,23 @@ def run_training_loop(
         modules.lr_controller.warmup_steps if (settings.use_ema and modules.lr_controller is not None) else 0
     )
 
+    def module_grad_norm(module) -> float:
+        norms = []
+        for param in module.parameters():
+            if param.grad is None:
+                continue
+            grad = param.grad.detach()
+            if grad.is_sparse:
+                grad = grad.coalesce().values()
+            norms.append(grad.float().norm(2))
+        if not norms:
+            return 0.0
+        return torch.norm(torch.stack(norms)).item()
+
     def optimizer_step_fn(loss_value, current_step, current_accum):
         grad_norm_value = None
+        grad_norm_te1 = None
+        grad_norm_te2 = None
         current_lr_factor = None
         if modules.lr_controller is not None:
             current_lr_factor = modules.lr_controller.apply(modules.optimizer, current_step)
@@ -154,6 +169,10 @@ def run_training_loop(
             scaler.unscale_(modules.optimizer)
             if tb_writer is not None and settings.tb_log_grad_norm:
                 grad_norm_value = compute_grad_norm(modules.optimizer)
+                if settings.train_text_encoder_1:
+                    grad_norm_te1 = module_grad_norm(modules.te1)
+                if settings.train_text_encoder_2:
+                    grad_norm_te2 = module_grad_norm(modules.te2)
             if settings.max_grad_norm is not None and settings.max_grad_norm > 0:
                 params_to_clip = [
                     p for group in modules.optimizer.param_groups for p in group["params"] if p.grad is not None
@@ -205,6 +224,10 @@ def run_training_loop(
                 )
             if grad_norm_value is not None:
                 tb_writer.add_scalar("train/grad_norm", grad_norm_value, current_step)
+            if grad_norm_te1 is not None:
+                tb_writer.add_scalar("train/grad_norm_te1", grad_norm_te1, current_step)
+            if grad_norm_te2 is not None:
+                tb_writer.add_scalar("train/grad_norm_te2", grad_norm_te2, current_step)
             if settings.tb_log_scaler:
                 tb_writer.add_scalar("train/amp_scale", scaler.get_scale(), current_step)
             tb_writer.add_scalar("train/global_step", current_step, current_step)
