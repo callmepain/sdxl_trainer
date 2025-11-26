@@ -165,3 +165,9 @@ Während des Trainings:
 
 Viel Erfolg beim Fine-Tuning! Bei Fragen oder Wunsch nach zusätzlichen Features einfach melden.
 
+## Demo: Trainings-Forward-Pass visualisieren
+
+- `demo_training_flow.py` lädt dieselben Komponenten wie im Training (UNet/VAE/TE1+2, Scheduler, VAE-Scaling) anhand deiner `config.json`, zieht 3–4 Beispielsamples aus `data/images` (inkl. Caption-Transforms) und simuliert genau den Forward-Schritt ohne Backprop.
+- Starten mit aktivierter venv: `python demo_training_flow.py` (Optionen: `--config pfad/zur/config.json`, `--samples 3`), UI öffnet sich via Gradio.
+- UI: Sample-Dropdown + Timestep-Slider → zeigt nebeneinander das trainierte Input-Bild (nach Resize/Norm), `x_t` mit Noise + Scheduler sowie `x0_pred`, also die UNet-Schätzung des sauberen Bildes. Zusätzlich gibt es eine Cross-Attention-Heatmap pro auswählbarem Token (Aggregat über die hochauflösende Cross-Attn). Läuft unter `torch.no_grad()`, nutzt GPU falls verfügbar und fällt ansonsten auf CPU zurück.
+
