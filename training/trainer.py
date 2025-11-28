@@ -157,6 +157,7 @@ def run_training_loop(
         grad_norm_value = None
         grad_norm_te1 = None
         grad_norm_te2 = None
+        grad_norm_before_clip = None
         current_lr_factor = None
         if modules.lr_controller is not None:
             current_lr_factor = modules.lr_controller.apply(modules.optimizer, current_step)
@@ -178,7 +179,15 @@ def run_training_loop(
                     p for group in modules.optimizer.param_groups for p in group["params"] if p.grad is not None
                 ]
                 if params_to_clip:
-                    clip_grad_norm_(params_to_clip, max_norm=settings.max_grad_norm)
+                    grad_norm_before_clip = clip_grad_norm_(
+                        params_to_clip,
+                        max_norm=settings.max_grad_norm,
+                        norm_type=2.0,
+                        error_if_nonfinite=settings.detect_anomaly,
+                    )
+                    # DEBUG: Log grad norm before clipping
+                    if current_step % 50 == 0:
+                        print(f"[step {current_step}] grad_norm_before_clip={grad_norm_before_clip:.4f}, max_grad_norm={settings.max_grad_norm}")
 
         scaler.step(modules.optimizer)
         scaler.update()
@@ -198,16 +207,18 @@ def run_training_loop(
         if settings.log_every is not None and current_step % settings.log_every == 0:
             lr_summary = ""
             if modules.lr_controller is not None:
+                lr_ctrl = modules.lr_controller  # Cache to prevent theoretical None-dereferencing
                 unet_lr = modules.optimizer.param_groups[0]["lr"]
                 lr_parts = [f"unet={unet_lr:.3e}"]
                 if settings.train_text_encoder_1 and te1_group_idx is not None:
                     lr_parts.append(f"te1={modules.optimizer.param_groups[te1_group_idx]['lr']:.3e}")
                 if settings.train_text_encoder_2 and te2_group_idx is not None:
                     lr_parts.append(f"te2={modules.optimizer.param_groups[te2_group_idx]['lr']:.3e}")
+                factor_value = current_lr_factor if current_lr_factor is not None else lr_ctrl.last_factor
                 lr_summary = (
                     f" | lr {'/'.join(lr_parts)}"
-                    f" (factor={current_lr_factor or modules.lr_controller.last_factor:.4f}, "
-                    f"{modules.lr_controller.scheduler_type})"
+                    f" (factor={factor_value:.4f}, "
+                    f"{lr_ctrl.scheduler_type})"
                 )
             print(f"step {current_step} | loss {display_loss:.4f}{lr_summary}")
 
@@ -224,6 +235,8 @@ def run_training_loop(
                 )
             if grad_norm_value is not None:
                 tb_writer.add_scalar("train/grad_norm", grad_norm_value, current_step)
+            if grad_norm_before_clip is not None:
+                tb_writer.add_scalar("train/grad_norm_before_clip", grad_norm_before_clip, current_step)
             if grad_norm_te1 is not None:
                 tb_writer.add_scalar("train/grad_norm_te1", grad_norm_te1, current_step)
             if grad_norm_te2 is not None:
@@ -305,6 +318,10 @@ def run_training_loop(
                 target_sizes = batch.get("target_size")
                 if target_sizes is not None:
                     target_sizes = target_sizes.to(device=settings.device)
+                    if target_sizes.ndim != 2 or target_sizes.shape[1] != 2:
+                        raise ValueError(
+                            f"target_size must have shape (batch_size, 2), got {target_sizes.shape}"
+                        )
                     heights = target_sizes[:, 0].to(pooled_embeds.dtype)
                     widths = target_sizes[:, 1].to(pooled_embeds.dtype)
                 else:
@@ -340,10 +357,10 @@ def run_training_loop(
 
                 if settings.snr_gamma is not None and settings.prediction_type in ("epsilon", "v_prediction"):
                     if sigma_for_loss is not None:
-                        sigma_vals = sigma_for_loss.to(per_example_loss.dtype)
+                        sigma_vals = sigma_for_loss.to(device=per_example_loss.device, dtype=per_example_loss.dtype)
                         snr_vals = 1.0 / torch.clamp(sigma_vals ** 2, min=1e-8)
                     else:
-                        alphas_now = alphas_cumprod_tensor.index_select(0, timesteps).to(per_example_loss.dtype)
+                        alphas_now = alphas_cumprod_tensor.index_select(0, timesteps).to(device=per_example_loss.device, dtype=per_example_loss.dtype)
                         snr_vals = alphas_now / torch.clamp(1 - alphas_now, min=1e-8)
                     gamma_tensor = torch.full_like(snr_vals, settings.snr_gamma)
                     snr_weights = torch.minimum(snr_vals, gamma_tensor) / torch.clamp(snr_vals, min=1e-8)

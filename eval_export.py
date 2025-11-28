@@ -311,6 +311,12 @@ class EvalRunner:
                 call_kwargs["height"] = height
                 call_kwargs["width"] = width
             result = pipe(**call_kwargs)
+            if not result.images or len(result.images) == 0:
+                warnings.warn(
+                    f"Pipeline returned no images for prompt at index {idx} (step={step}). Skipping.",
+                    stacklevel=2,
+                )
+                continue
             image = result.images[0]
             filename = dest / f"step_{step:06d}_idx_{idx:03d}_seed_{seed}.png"
             image.save(filename)
@@ -343,6 +349,12 @@ class EvalRunner:
                 call_kwargs["height"] = height
                 call_kwargs["width"] = width
             result = kd_pipe(**call_kwargs)
+            if not result.images or len(result.images) == 0:
+                warnings.warn(
+                    f"k-diffusion pipeline returned no images for prompt at index {idx} (step={step}). Skipping.",
+                    stacklevel=2,
+                )
+                continue
             image = result.images[0]
             filename = dest / f"step_{step:06d}_idx_{idx:03d}_seed_{seed}.png"
             image.save(filename)

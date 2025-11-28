@@ -26,4 +26,6 @@ data/*
 # Lokale Config
 config.json
 AGENTS.md
+CLAUDE.md
 GEMINI.md
+.claude/

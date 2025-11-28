@@ -395,6 +395,17 @@ if snr_gamma is not None:
 max_grad_norm = training_cfg.get("max_grad_norm")
 if max_grad_norm is not None:
     max_grad_norm = float(max_grad_norm)
+    if max_grad_norm < 0:
+        warnings.warn(
+            f"max_grad_norm muss >= 0 sein, erhalten: {max_grad_norm}. Feature wird deaktiviert.",
+            stacklevel=2,
+        )
+        max_grad_norm = None
+    elif max_grad_norm == 0:
+        warnings.warn(
+            "max_grad_norm=0 deaktiviert Gradient Clipping (alle Gradienten auf 0 gesetzt). Meintest du None?",
+            stacklevel=2,
+        )
 detect_anomaly = bool(training_cfg.get("detect_anomaly", True))
 ema_update_every = int(training_cfg.get("ema_update_every", 10) or 10)
 if ema_update_every < 1:
@@ -976,38 +987,6 @@ if eval_cfg and (eval_cfg.get("live", {}).get("enabled") or eval_cfg.get("final"
         eval_runner = candidate
     else:
         print("Eval deaktiviert: keine gültigen Prompts gefunden.")
-
-class MinSigmaController:
-    def __init__(self, sigma_lookup_tensor, min_sigma_value, warmup_steps):
-        self.active = (
-            sigma_lookup_tensor is not None
-            and min_sigma_value is not None
-            and min_sigma_value > 0
-            and warmup_steps > 0
-        )
-        self.sigma_lookup = sigma_lookup_tensor
-        self.min_sigma = min_sigma_value if self.active else None
-        self.warmup_steps = warmup_steps if self.active else 0
-        self._min_sigma_tensor = None
-
-    def __call__(self, timesteps: torch.LongTensor, step_idx: int):
-        if not self.active:
-            return None, None
-
-        sigma_original = self.sigma_lookup.index_select(0, timesteps)
-
-        if step_idx < self.warmup_steps:
-            return sigma_original, None
-
-        if self._min_sigma_tensor is None or self._min_sigma_tensor.device != sigma_original.device:
-            self._min_sigma_tensor = torch.tensor(
-                self.min_sigma,
-                device=sigma_original.device,
-                dtype=sigma_original.dtype,
-            )
-        sigma_effective = torch.maximum(sigma_original, self._min_sigma_tensor)
-        return sigma_original, sigma_effective
-
 
 enforce_min_sigma = MinSigmaController(sigma_lookup, min_sigma, min_sigma_warmup_steps)
 if enforce_min_sigma.active:
