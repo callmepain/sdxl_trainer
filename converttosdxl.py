@@ -278,12 +278,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_safetensors", action="store_true", help="Save weights use safetensors, default is ckpt."
     )
+    parser.add_argument("--bf16", action="store_true", help="Save weights in bfloat16 precision.")
 
     args = parser.parse_args()
 
     assert args.model_path is not None, "Must provide a model path!"
 
     assert args.checkpoint_path is not None, "Must provide a checkpoint path!"
+
+    if args.half and args.bf16:
+        raise ValueError("Choose only one of --half or --bf16.")
 
     # Path for safetensors
     unet_path = osp.join(args.model_path, "unet", "diffusion_pytorch_model.safetensors")
@@ -342,9 +346,17 @@ if __name__ == "__main__":
 
     if args.half:
         state_dict = {k: v.half() for k, v in state_dict.items()}
+    elif args.bf16:
+        state_dict = {k: v.to(torch.bfloat16) for k, v in state_dict.items()}
 
-    if args.use_safetensors:
+    # Decide output format: explicit flag wins; otherwise infer from extension.
+    checkpoint_lower = args.checkpoint_path.lower()
+    inferred_safetensors = checkpoint_lower.endswith(".safetensors")
+    save_as_safetensors = args.use_safetensors or inferred_safetensors
+
+    if save_as_safetensors:
         save_file(state_dict, args.checkpoint_path)
     else:
+        # ComfyUI expects a flat state dict inside the top-level "state_dict" key for ckpt.
         state_dict = {"state_dict": state_dict}
         torch.save(state_dict, args.checkpoint_path)

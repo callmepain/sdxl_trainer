@@ -51,6 +51,7 @@ class TrainingLoopSettings:
     noise_offset: float
     snr_gamma: Optional[float]
     max_grad_norm: Optional[float]
+    max_grad_norm_te_multiplier: float
     detect_anomaly: bool
     ema_update_every: int
     num_steps: Optional[int]
@@ -175,19 +176,37 @@ def run_training_loop(
                 if settings.train_text_encoder_2:
                     grad_norm_te2 = module_grad_norm(modules.te2)
             if settings.max_grad_norm is not None and settings.max_grad_norm > 0:
-                params_to_clip = [
-                    p for group in modules.optimizer.param_groups for p in group["params"] if p.grad is not None
-                ]
-                if params_to_clip:
+                # Clip UNet separately
+                unet_params = [p for p in modules.optimizer.param_groups[0]["params"] if p.grad is not None]
+                if unet_params:
                     grad_norm_before_clip = clip_grad_norm_(
-                        params_to_clip,
+                        unet_params,
                         max_norm=settings.max_grad_norm,
                         norm_type=2.0,
                         error_if_nonfinite=settings.detect_anomaly,
                     )
-                    # DEBUG: Log grad norm before clipping
-                    if current_step % 50 == 0:
-                        print(f"[step {current_step}] grad_norm_before_clip={grad_norm_before_clip:.4f}, max_grad_norm={settings.max_grad_norm}")
+
+                # Clip TEs with separate (higher) threshold to avoid over-clipping
+                te_max_norm = settings.max_grad_norm * settings.max_grad_norm_te_multiplier
+                if settings.train_text_encoder_1 and te1_group_idx is not None:
+                    te1_params = [p for p in modules.optimizer.param_groups[te1_group_idx]["params"] if p.grad is not None]
+                    if te1_params:
+                        clip_grad_norm_(
+                            te1_params,
+                            max_norm=te_max_norm,
+                            norm_type=2.0,
+                            error_if_nonfinite=settings.detect_anomaly,
+                        )
+
+                if settings.train_text_encoder_2 and te2_group_idx is not None:
+                    te2_params = [p for p in modules.optimizer.param_groups[te2_group_idx]["params"] if p.grad is not None]
+                    if te2_params:
+                        clip_grad_norm_(
+                            te2_params,
+                            max_norm=te_max_norm,
+                            norm_type=2.0,
+                            error_if_nonfinite=settings.detect_anomaly,
+                        )
 
         scaler.step(modules.optimizer)
         scaler.update()

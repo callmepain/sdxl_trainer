@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {
         "prediction_type": "v_prediction",
         "snr_gamma": None,
         "max_grad_norm": None,
+        "max_grad_norm_te_multiplier": 10.0,
         "detect_anomaly": True,
         "lr_warmup_steps": 0,
         "ema_update_every": 10,

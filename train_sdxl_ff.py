@@ -406,6 +406,9 @@ if max_grad_norm is not None:
             "max_grad_norm=0 deaktiviert Gradient Clipping (alle Gradienten auf 0 gesetzt). Meintest du None?",
             stacklevel=2,
         )
+max_grad_norm_te_multiplier = training_cfg.get("max_grad_norm_te_multiplier", 10.0)
+if max_grad_norm_te_multiplier is not None:
+    max_grad_norm_te_multiplier = float(max_grad_norm_te_multiplier)
 detect_anomaly = bool(training_cfg.get("detect_anomaly", True))
 ema_update_every = int(training_cfg.get("ema_update_every", 10) or 10)
 if ema_update_every < 1:
@@ -669,7 +672,7 @@ def encode_text(captions_batch):
     text_embeds = torch.cat([prompt_embeds_1, prompt_embeds_2], dim=-1)
     pooled_embeds = enc_2.text_embeds
 
-    # SDXL erwartet float32 für Text-Embeddings während BF16/FP16 Training
+    # Text-Embeddings im Training-dtype (BF16/FP16) für Kompatibilität mit UNet
     return text_embeds.to(dtype), pooled_embeds.to(dtype)
 
 
@@ -1028,6 +1031,7 @@ trainer_settings = TrainingLoopSettings(
     noise_offset=noise_offset,
     snr_gamma=snr_gamma,
     max_grad_norm=max_grad_norm,
+    max_grad_norm_te_multiplier=max_grad_norm_te_multiplier,
     detect_anomaly=detect_anomaly,
     ema_update_every=ema_update_every,
     num_steps=num_steps,
