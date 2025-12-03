@@ -1,0 +1,118 @@
+{
+  "device": "cuda",
+  "run": {
+    "name": "Chris_v13_te_aggressive",
+    "output_root": ".output",
+    "checkpoint_root": ".output/safetensors"
+  },
+  "model": {
+    "id": ".output/Chris_v11",
+    "use_ema": false,
+    "ema_decay": 0.9999,
+    "use_bf16": true,
+    "use_gradient_checkpointing": false,
+    "train_text_encoder_1": true,
+    "train_text_encoder_2": true,
+    "use_torch_compile": false,
+    "torch_compile_kwargs": { "mode": "reduce-overhead" }
+  },
+  "training": {
+    "output_dir": null,
+    "batch_size": 4,
+    "num_steps": 500,
+    "num_epochs": null,
+    "lr_unet": 5e-06,
+    "lr_text_encoder_1": 1e-04,
+    "lr_text_encoder_2": 5e-05,
+    "max_grad_norm_te_multiplier": 50.0,
+    "log_every": 25,
+    "checkpoint_every": 250,
+    "grad_accum_steps": 2,
+    "noise_offset": 0.05,
+    "min_sigma": 0.01,
+    "min_sigma_warmup_steps": 50,
+    "prediction_type": null,
+    "snr_gamma": 5.0,
+    "max_grad_norm": 1.0,
+    "detect_anomaly": true,
+    "lr_warmup_steps": 50,
+    "ema_update_every": 10,
+    "resume_from": null,
+    "resume_state_path": null,
+    "state_path": null,
+    "seed": 42,
+    "lr_scheduler": {
+      "type": "constant",
+      "warmup_steps": 50,
+      "min_factor": 1.0
+    },
+    "tensorboard": {
+      "enabled": true,
+      "log_dir": null,
+      "base_dir": "./logs/tensorboard",
+      "log_grad_norm": true,
+      "log_scaler": true
+    }
+  },
+  "data": {
+    "image_dir": "./data/images",
+    "size": 1024,
+    "shuffle": true,
+    "num_workers": 8,
+    "pin_memory": true,
+    "caption_dropout_prob": 0.0,
+    "caption_shuffle_prob": 0.0,
+    "caption_shuffle_separator": ",",
+    "caption_shuffle_min_tokens": 2,
+    "bucket": {
+      "enabled": true,
+      "resolutions": [[1024,1024],[832,1216],[1216,832]],
+      "divisible_by": 64,
+      "batch_size": 4,
+      "drop_last": false,
+      "per_resolution_batch_sizes": { }
+    },
+    "latent_cache": {
+      "enabled": true,
+      "cache_dir": "./cache/latents",
+      "dtype": "auto",
+      "build_batch_size": 8
+    }
+  },
+  "optimizer": {
+    "weight_decay": 0.01,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08
+  },
+  "export": {
+    "save_single_file": true,
+    "checkpoint_path": null,
+    "converter_script": "./converttosdxl.py",
+    "half_precision": true,
+    "use_safetensors": true,
+    "extra_args": []
+  },
+  "eval": {
+    "backend": "kdiffusion",
+    "sampler_name": "sample_dpmpp_2m_sde",
+    "scheduler": "beta",
+    "num_inference_steps": 35,
+    "cfg_scale": 4.5,
+    "prompts_path": "./data/eval_prompts.json",
+    "height": 1216,
+    "width": 832,
+    "use_ema": false,
+    "live": {
+      "enabled": true,
+      "every_n_steps": 250,
+      "max_batches": 2
+    },
+    "final": {
+      "enabled": true,
+      "max_batches": null
+    }
+  }
+}
