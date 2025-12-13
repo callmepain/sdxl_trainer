@@ -36,6 +36,8 @@ DEFAULT_CONFIG = {
         "noise_offset": 0.1,
         "min_sigma": 0.4,
         "min_sigma_warmup_steps": 20,
+        "min_timestep": None,
+        "max_timestep": None,
         "prediction_type": "v_prediction",
         "snr_gamma": None,
         "max_grad_norm": None,

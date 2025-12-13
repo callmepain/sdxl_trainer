@@ -62,6 +62,8 @@ class TrainingLoopSettings:
     tb_log_scaler: bool
     batch_size: int
     prediction_type: str
+    min_timestep: Optional[int]
+    max_timestep: Optional[int]
 
 
 @dataclass
@@ -316,19 +318,29 @@ def run_training_loop(
                         device=settings.device,
                         dtype=noise.dtype,
                     )
+                min_t = settings.min_timestep if settings.min_timestep is not None else 0
+                max_t = (
+                    settings.max_timestep
+                    if settings.max_timestep is not None
+                    else noise_scheduler.config.num_train_timesteps
+                )
                 timesteps = torch.randint(
-                    0,
-                    noise_scheduler.config.num_train_timesteps,
+                    min_t,
+                    max_t,
                     (latents.shape[0],),
                     device=settings.device,
                     dtype=torch.long,
                 )
                 sigma_original, sigma_effective = enforce_min_sigma(timesteps, global_step)
                 sigma_for_loss = sigma_effective if sigma_effective is not None else sigma_original
-                if tb_writer is not None and sigma_original is not None:
-                    tb_writer.add_scalar("train/sigma/original", sigma_original.mean().item(), global_step)
-                    if sigma_effective is not None:
-                        tb_writer.add_scalar("train/sigma/effective", sigma_effective.mean().item(), global_step)
+                if tb_writer is not None:
+                    tb_writer.add_scalar("train/timestep/mean", timesteps.float().mean().item(), global_step)
+                    tb_writer.add_scalar("train/timestep/min", timesteps.float().min().item(), global_step)
+                    tb_writer.add_scalar("train/timestep/max", timesteps.float().max().item(), global_step)
+                    if sigma_original is not None:
+                        tb_writer.add_scalar("train/sigma/original", sigma_original.mean().item(), global_step)
+                        if sigma_effective is not None:
+                            tb_writer.add_scalar("train/sigma/effective", sigma_effective.mean().item(), global_step)
 
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 

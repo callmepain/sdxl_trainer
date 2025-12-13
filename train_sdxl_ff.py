@@ -388,6 +388,27 @@ if min_sigma is not None and min_sigma_warmup_steps <= 0:
     min_sigma_warmup_steps = 0
 else:
     min_sigma_warmup_steps = max(0, min_sigma_warmup_steps)
+
+min_timestep = training_cfg.get("min_timestep")
+max_timestep = training_cfg.get("max_timestep")
+if min_timestep is not None:
+    min_timestep = int(min_timestep)
+    if min_timestep < 0:
+        warnings.warn("min_timestep < 0, wird auf 0 gesetzt.", stacklevel=2)
+        min_timestep = 0
+if max_timestep is not None:
+    max_timestep = int(max_timestep)
+    if max_timestep < 0:
+        warnings.warn("max_timestep < 0, wird ignoriert.", stacklevel=2)
+        max_timestep = None
+if min_timestep is not None and max_timestep is not None and min_timestep >= max_timestep:
+    warnings.warn(
+        f"min_timestep ({min_timestep}) >= max_timestep ({max_timestep}), beide werden ignoriert.",
+        stacklevel=2,
+    )
+    min_timestep = None
+    max_timestep = None
+
 prediction_type_override = training_cfg.get("prediction_type")
 snr_gamma = training_cfg.get("snr_gamma")
 if snr_gamma is not None:
@@ -553,9 +574,16 @@ run_summary.append(("bucket.log_switches", bucket_log_switches))
 min_sigma_summary = (
     f"{min_sigma} (warmup_steps={min_sigma_warmup_steps})" if min_sigma is not None else "deaktiviert"
 )
+timestep_range_parts = []
+if min_timestep is not None:
+    timestep_range_parts.append(f"min={min_timestep}")
+if max_timestep is not None:
+    timestep_range_parts.append(f"max={max_timestep}")
+timestep_range_summary = ", ".join(timestep_range_parts) if timestep_range_parts else "unrestricted"
 run_summary.append(("device", device))
 run_summary.append(("dtype.train", _format_dtype(dtype)))
 run_summary.append(("min_sigma", min_sigma_summary))
+run_summary.append(("timestep_range", timestep_range_summary))
 run_summary.append(("model.id", model_load_path))
 run_summary.append(("run.name", run_name or "n/a"))
 run_summary.append(
@@ -1042,6 +1070,8 @@ trainer_settings = TrainingLoopSettings(
     tb_log_scaler=tb_log_scaler,
     batch_size=batch_size,
     prediction_type=prediction_type,
+    min_timestep=min_timestep,
+    max_timestep=max_timestep,
 )
 
 trainer_paths = TrainingPaths(
