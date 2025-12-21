@@ -1,0 +1,41 @@
+{
+  "device": "cuda",
+  "teacher": {
+    "checkpoint_path": ".output/chaos_XL_v_0_3",
+    "teacher_id": "teacher_chaos",
+    "use_bf16": true
+  },
+  "data": {
+    "image_dir": "./data/images",
+    "size": 1024,
+    "bucket": {
+      "enabled": true,
+      "resolutions": [
+        [1024, 1024],
+        [896, 1152],
+        [1152, 896],
+        [832, 1216],
+        [1216, 832],
+        [768, 1344],
+        [1344, 768]
+      ],
+      "divisible_by": 64
+    },
+    "latent_cache": {
+      "enabled": true,
+      "cache_dir": "./cache/latents"
+    }
+  },
+  "cache": {
+    "output_dir": "./cache/teacher_predictions",
+    "version": "1",
+    "dtype": "fp16",
+    "base_seed": 42,
+    "min_timestep": 0,
+    "max_timestep": 1000,
+    "skip_existing": true
+  },
+  "model": {
+    "id": null
+  }
+}

@@ -59,10 +59,24 @@ class LearningRateController:
 
         return 1.0
 
-    def apply(self, optimizer, step: int) -> float:
+    def apply(self, optimizer, step: int, optimizer_te=None) -> float:
+        """Apply learning rate factor to optimizer(s).
+
+        Args:
+            optimizer: The UNet optimizer (or single combined optimizer in legacy mode)
+            step: Current training step
+            optimizer_te: Optional separate text encoder optimizer
+
+        Returns:
+            The computed LR factor
+        """
         factor = self.compute_factor(step)
         for group in self.param_groups:
-            optimizer.param_groups[group["idx"]]["lr"] = group["base_lr"] * factor
+            target_optimizer = optimizer
+            # Check if this group should use the TE optimizer
+            if optimizer_te is not None and group.get("optimizer") == "te":
+                target_optimizer = optimizer_te
+            target_optimizer.param_groups[group["idx"]]["lr"] = group["base_lr"] * factor
         self.last_factor = factor
         return factor
 

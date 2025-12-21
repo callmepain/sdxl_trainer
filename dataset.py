@@ -318,6 +318,9 @@ class SimpleCaptionDataset(Dataset):
             padding="max_length", return_tensors="pt"
         )
 
+        # Compute image_id from relative path (for distillation cache matching)
+        image_id = str(img_path.relative_to(self.img_dir).with_suffix(''))
+
         sample = {
             "input_ids_1": tokens_1.input_ids[0],
             "attention_mask_1": tokens_1.attention_mask[0],
@@ -326,6 +329,7 @@ class SimpleCaptionDataset(Dataset):
             "target_size": torch.tensor(
                 [target_height, target_width], dtype=torch.int32
             ),
+            "image_id": image_id,
         }
 
         if self.latent_cache_active:

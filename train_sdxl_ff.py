@@ -925,37 +925,60 @@ if min_sigma is not None:
     )
     sigma_lookup = sigma_lookup.to(device=device)
 
-# 5) Optimizer mit Param-Groups
-param_groups = [
-    {"params": unet.parameters(), "lr": lr_unet},
-]
-te1_group_idx = None
-te2_group_idx = None
-if train_text_encoder_1:
-    te1_group_idx = len(param_groups)
-    param_groups.append({"params": te1.parameters(), "lr": lr_te1})
-if train_text_encoder_2:
-    te2_group_idx = len(param_groups)
-    param_groups.append({"params": te2.parameters(), "lr": lr_te2})
-
-optimizer = bnb.optim.AdamW8bit(
-    param_groups,
+# 5) Optimizer - separate optimizers for UNet (AdamW8bit) and Text Encoders (AdamW)
+optimizer_unet = bnb.optim.AdamW8bit(
+    [{"params": unet.parameters(), "lr": lr_unet}],
     weight_decay=optimizer_cfg["weight_decay"],
     betas=tuple(optimizer_cfg.get("betas", (0.9, 0.999))),
     eps=optimizer_cfg.get("eps", 1e-8),
 )
+
+# Text encoder optimizer (standard AdamW for better precision with small gradients)
+optimizer_te = None
+te_param_groups = []
+if train_text_encoder_1:
+    te_param_groups.append({"params": te1.parameters(), "lr": lr_te1})
+if train_text_encoder_2:
+    te_param_groups.append({"params": te2.parameters(), "lr": lr_te2})
+
+if te_param_groups:
+    optimizer_te = torch.optim.AdamW(
+        te_param_groups,
+        weight_decay=optimizer_cfg["weight_decay"],
+        betas=tuple(optimizer_cfg.get("betas", (0.9, 0.999))),
+        eps=optimizer_cfg.get("eps", 1e-8),
+    )
+    print(f"Text Encoder Optimizer: AdamW (FP32 state) mit {len(te_param_groups)} param group(s)")
+print(f"UNet Optimizer: AdamW8bit")
 
 # 6) EMA
 ema_unet = EMAModel(unet.parameters(), decay=ema_decay) if use_ema else None
 if ema_unet is not None:
     _move_ema_to_device(ema_unet, device)
 if resume_state_dict is not None:
-    opt_state = resume_state_dict.get("optimizer")
-    if opt_state is not None:
+    # Try new format first (separate optimizers), fall back to legacy format
+    opt_unet_state = resume_state_dict.get("optimizer_unet")
+    if opt_unet_state is not None:
         try:
-            optimizer.load_state_dict(opt_state)
+            optimizer_unet.load_state_dict(opt_unet_state)
         except Exception as exc:
-            warnings.warn(f"Optimizer-Status konnte nicht geladen werden ({exc}).", stacklevel=2)
+            warnings.warn(f"UNet Optimizer-Status konnte nicht geladen werden ({exc}).", stacklevel=2)
+    else:
+        # Legacy format: single "optimizer" key
+        opt_state = resume_state_dict.get("optimizer")
+        if opt_state is not None:
+            warnings.warn(
+                "Legacy optimizer state gefunden. Resume mit altem State-Format nicht vollständig unterstützt.",
+                stacklevel=2
+            )
+
+    opt_te_state = resume_state_dict.get("optimizer_te")
+    if opt_te_state is not None and optimizer_te is not None:
+        try:
+            optimizer_te.load_state_dict(opt_te_state)
+        except Exception as exc:
+            warnings.warn(f"Text Encoder Optimizer-Status konnte nicht geladen werden ({exc}).", stacklevel=2)
+
     ema_state = resume_state_dict.get("ema")
     if ema_state is not None and ema_unet is not None:
         try:
@@ -980,13 +1003,16 @@ if active_scheduler_cfg is None and legacy_warmup_steps > 0:
 
 lr_controller = None
 if active_scheduler_cfg is not None:
+    # UNet optimizer has only one param group (index 0)
     lr_groups = [
-        {"name": "unet", "idx": 0, "base_lr": lr_unet},
+        {"name": "unet", "idx": 0, "base_lr": lr_unet, "optimizer": "unet"},
     ]
-    if train_text_encoder_1 and te1_group_idx is not None:
-        lr_groups.append({"name": "te1", "idx": te1_group_idx, "base_lr": lr_te1})
-    if train_text_encoder_2 and te2_group_idx is not None:
-        lr_groups.append({"name": "te2", "idx": te2_group_idx, "base_lr": lr_te2})
+    # Text encoder optimizer has its own param groups (TE1 at idx 0, TE2 at idx 0 or 1)
+    if train_text_encoder_1:
+        lr_groups.append({"name": "te1", "idx": 0, "base_lr": lr_te1, "optimizer": "te"})
+    if train_text_encoder_2:
+        te2_idx = 1 if train_text_encoder_1 else 0
+        lr_groups.append({"name": "te2", "idx": te2_idx, "base_lr": lr_te2, "optimizer": "te"})
 
     total_training_steps = num_steps if num_steps is not None else total_progress_steps
     lr_controller = LearningRateController(active_scheduler_cfg, total_training_steps, lr_groups)
@@ -1035,7 +1061,8 @@ trainer_modules = TrainerModules(
     unet=unet,
     te1=te1,
     te2=te2,
-    optimizer=optimizer,
+    optimizer_unet=optimizer_unet,
+    optimizer_te=optimizer_te,
     lr_controller=lr_controller,
     ema_unet=ema_unet,
 )
@@ -1105,7 +1132,5 @@ trainer_result = run_training_loop(
     eval_runner=eval_runner,
     tb_writer=tb_writer,
     bucket_key_fn=bucket_key_from_target_size,
-    te1_group_idx=te1_group_idx,
-    te2_group_idx=te2_group_idx,
     export_cfg=export_cfg,
 )

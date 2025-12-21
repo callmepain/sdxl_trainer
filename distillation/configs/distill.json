@@ -1,0 +1,92 @@
+{
+  "device": "cuda",
+  "run": {
+    "name": "distill_student_v1",
+    "output_root": ".output/distill"
+  },
+  "student": {
+    "checkpoint_path": "PainCraft_XL_Reforged_v1_diffusers",
+    "use_bf16": true,
+    "use_gradient_checkpointing": true,
+    "use_ema": false,
+    "ema_decay": 0.9999,
+    "ema_update_every": 10
+  },
+  "teachers": [
+    {
+      "teacher_id": "teacher_v1",
+      "cache_dir": "./cache/teacher_predictions",
+      "weight": 0.333
+    },
+    {
+      "teacher_id": "teacher_chaos",
+      "cache_dir": "./cache/teacher_predictions",
+      "weight": 0.333
+    },
+    {
+      "teacher_id": "teacher_bs4",
+      "cache_dir": "./cache/teacher_predictions",
+      "weight": 0.334
+    }
+  ],
+  "training": {
+    "batch_size": 4,
+    "num_steps": 1000,
+    "num_epochs": null,
+    "lr": 5e-6,
+    "grad_accum_steps": 1,
+    "log_every": 0,
+    "checkpoint_every": 1000,
+    "max_grad_norm": 1.0,
+    "loss_type": "mse",
+    "lr_scheduler": {
+      "type": "cosine_decay",
+      "warmup_steps": 200,
+      "min_factor": 0.1
+    },
+    "tensorboard": {
+      "enabled": true,
+      "base_dir": "./logs/tensorboard/distill",
+      "log_per_teacher_loss": true,
+      "log_grad_norm": true
+    }
+  },
+  "data": {
+    "image_dir": "./data/images",
+    "size": 1024,
+    "bucket": {
+      "enabled": true,
+      "resolutions": [
+        [1024, 1024],
+        [896, 1152],
+        [1152, 896],
+        [832, 1216],
+        [1216, 832],
+        [768, 1344],
+        [1344, 768]
+      ],
+      "drop_last": false,
+      "per_resolution_batch_sizes": {}
+    },
+    "latent_cache": {
+      "enabled": true,
+      "cache_dir": "./cache/latents"
+    },
+    "num_workers": 4,
+    "pin_memory": true
+  },
+  "cache": {
+    "version": "1",
+    "require_all_teachers": true
+  },
+  "optimizer": {
+    "weight_decay": 0.01,
+    "betas": [0.9, 0.999],
+    "eps": 1e-8
+  },
+  "export": {
+    "save_single_file": true,
+    "converter_script": "./converttosdxl.py",
+    "half_precision": true
+  }
+}

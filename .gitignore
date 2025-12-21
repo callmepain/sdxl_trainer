@@ -11,6 +11,7 @@ sdxl_ff_out*/
 .output*/
 cache*/
 new_beginning/
+PainCraft_XL_Reforged_v1_diffusers*/
 logs/
 wandb/
 *.safetensors

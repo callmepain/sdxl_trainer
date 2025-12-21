@@ -25,7 +25,8 @@ class TrainerModules:
     unet: Any
     te1: Any
     te2: Any
-    optimizer: Any
+    optimizer_unet: Any
+    optimizer_te: Optional[Any]  # Separate optimizer for text encoders (None if not training TEs)
     lr_controller: Optional[LearningRateController]
     ema_unet: Optional[Any]
 
@@ -99,8 +100,6 @@ def run_training_loop(
     eval_runner: Optional[Any] = None,
     tb_writer: Optional[Any] = None,
     bucket_key_fn: Optional[Callable] = None,
-    te1_group_idx: Optional[int] = None,
-    te2_group_idx: Optional[int] = None,
     export_cfg: Optional[Dict[str, Any]] = None,
     ) -> TrainerResult:
     bucket_key_fn = bucket_key_fn or (lambda _: None)
@@ -129,7 +128,9 @@ def run_training_loop(
     else:
         modules.te2.eval()
 
-    modules.optimizer.zero_grad(set_to_none=True)
+    modules.optimizer_unet.zero_grad(set_to_none=True)
+    if modules.optimizer_te is not None:
+        modules.optimizer_te.zero_grad(set_to_none=True)
 
     pbar_total = settings.total_progress_steps
     if pbar_total is not None and global_step > pbar_total:
@@ -163,23 +164,28 @@ def run_training_loop(
         grad_norm_before_clip = None
         current_lr_factor = None
         if modules.lr_controller is not None:
-            current_lr_factor = modules.lr_controller.apply(modules.optimizer, current_step)
+            # Apply LR schedule to both optimizers
+            current_lr_factor = modules.lr_controller.apply(
+                modules.optimizer_unet, current_step, optimizer_te=modules.optimizer_te
+            )
 
         need_unscale = (
             (settings.max_grad_norm is not None and settings.max_grad_norm > 0)
             or (tb_writer is not None and settings.tb_log_grad_norm)
         )
         if need_unscale:
-            scaler.unscale_(modules.optimizer)
+            scaler.unscale_(modules.optimizer_unet)
+            if modules.optimizer_te is not None:
+                scaler.unscale_(modules.optimizer_te)
             if tb_writer is not None and settings.tb_log_grad_norm:
-                grad_norm_value = compute_grad_norm(modules.optimizer)
+                grad_norm_value = compute_grad_norm(modules.optimizer_unet)
                 if settings.train_text_encoder_1:
                     grad_norm_te1 = module_grad_norm(modules.te1)
                 if settings.train_text_encoder_2:
                     grad_norm_te2 = module_grad_norm(modules.te2)
             if settings.max_grad_norm is not None and settings.max_grad_norm > 0:
-                # Clip UNet separately
-                unet_params = [p for p in modules.optimizer.param_groups[0]["params"] if p.grad is not None]
+                # Clip UNet
+                unet_params = [p for p in modules.optimizer_unet.param_groups[0]["params"] if p.grad is not None]
                 if unet_params:
                     grad_norm_before_clip = clip_grad_norm_(
                         unet_params,
@@ -189,31 +195,26 @@ def run_training_loop(
                     )
 
                 # Clip TEs with separate (higher) threshold to avoid over-clipping
-                te_max_norm = settings.max_grad_norm * settings.max_grad_norm_te_multiplier
-                if settings.train_text_encoder_1 and te1_group_idx is not None:
-                    te1_params = [p for p in modules.optimizer.param_groups[te1_group_idx]["params"] if p.grad is not None]
-                    if te1_params:
-                        clip_grad_norm_(
-                            te1_params,
-                            max_norm=te_max_norm,
-                            norm_type=2.0,
-                            error_if_nonfinite=settings.detect_anomaly,
-                        )
+                if modules.optimizer_te is not None:
+                    te_max_norm = settings.max_grad_norm * settings.max_grad_norm_te_multiplier
+                    for pg in modules.optimizer_te.param_groups:
+                        te_params = [p for p in pg["params"] if p.grad is not None]
+                        if te_params:
+                            clip_grad_norm_(
+                                te_params,
+                                max_norm=te_max_norm,
+                                norm_type=2.0,
+                                error_if_nonfinite=settings.detect_anomaly,
+                            )
 
-                if settings.train_text_encoder_2 and te2_group_idx is not None:
-                    te2_params = [p for p in modules.optimizer.param_groups[te2_group_idx]["params"] if p.grad is not None]
-                    if te2_params:
-                        clip_grad_norm_(
-                            te2_params,
-                            max_norm=te_max_norm,
-                            norm_type=2.0,
-                            error_if_nonfinite=settings.detect_anomaly,
-                        )
-
-        scaler.step(modules.optimizer)
+        scaler.step(modules.optimizer_unet)
+        if modules.optimizer_te is not None:
+            scaler.step(modules.optimizer_te)
         scaler.update()
 
-        modules.optimizer.zero_grad(set_to_none=True)
+        modules.optimizer_unet.zero_grad(set_to_none=True)
+        if modules.optimizer_te is not None:
+            modules.optimizer_te.zero_grad(set_to_none=True)
         current_accum = 0
 
         if modules.ema_unet is not None and current_step >= ema_start_step:
@@ -229,12 +230,14 @@ def run_training_loop(
             lr_summary = ""
             if modules.lr_controller is not None:
                 lr_ctrl = modules.lr_controller  # Cache to prevent theoretical None-dereferencing
-                unet_lr = modules.optimizer.param_groups[0]["lr"]
+                unet_lr = modules.optimizer_unet.param_groups[0]["lr"]
                 lr_parts = [f"unet={unet_lr:.3e}"]
-                if settings.train_text_encoder_1 and te1_group_idx is not None:
-                    lr_parts.append(f"te1={modules.optimizer.param_groups[te1_group_idx]['lr']:.3e}")
-                if settings.train_text_encoder_2 and te2_group_idx is not None:
-                    lr_parts.append(f"te2={modules.optimizer.param_groups[te2_group_idx]['lr']:.3e}")
+                if modules.optimizer_te is not None:
+                    if settings.train_text_encoder_1:
+                        lr_parts.append(f"te1={modules.optimizer_te.param_groups[0]['lr']:.3e}")
+                    if settings.train_text_encoder_2:
+                        te2_idx = 1 if settings.train_text_encoder_1 else 0
+                        lr_parts.append(f"te2={modules.optimizer_te.param_groups[te2_idx]['lr']:.3e}")
                 factor_value = current_lr_factor if current_lr_factor is not None else lr_ctrl.last_factor
                 lr_summary = (
                     f" | lr {'/'.join(lr_parts)}"
@@ -245,15 +248,17 @@ def run_training_loop(
 
         if tb_writer is not None:
             tb_writer.add_scalar("train/loss", display_loss, current_step)
-            tb_writer.add_scalar("train/lr_unet", modules.optimizer.param_groups[0]["lr"], current_step)
-            if settings.train_text_encoder_1 and te1_group_idx is not None:
-                tb_writer.add_scalar(
-                    "train/lr_text_encoder_1", modules.optimizer.param_groups[te1_group_idx]["lr"], current_step
-                )
-            if settings.train_text_encoder_2 and te2_group_idx is not None:
-                tb_writer.add_scalar(
-                    "train/lr_text_encoder_2", modules.optimizer.param_groups[te2_group_idx]["lr"], current_step
-                )
+            tb_writer.add_scalar("train/lr_unet", modules.optimizer_unet.param_groups[0]["lr"], current_step)
+            if modules.optimizer_te is not None:
+                if settings.train_text_encoder_1:
+                    tb_writer.add_scalar(
+                        "train/lr_text_encoder_1", modules.optimizer_te.param_groups[0]["lr"], current_step
+                    )
+                if settings.train_text_encoder_2:
+                    te2_idx = 1 if settings.train_text_encoder_1 else 0
+                    tb_writer.add_scalar(
+                        "train/lr_text_encoder_2", modules.optimizer_te.param_groups[te2_idx]["lr"], current_step
+                    )
             if grad_norm_value is not None:
                 tb_writer.add_scalar("train/grad_norm", grad_norm_value, current_step)
             if grad_norm_before_clip is not None:
@@ -274,7 +279,7 @@ def run_training_loop(
                 modules.ema_unet.copy_to(modules.unet.parameters())
 
             modules.pipe.save_pretrained(f"{paths.output_dir}_step_{current_step}")
-            save_training_state(paths.state_save_path, modules.optimizer, scaler, modules.ema_unet, current_step, epoch, None)
+            save_training_state(paths.state_save_path, modules.optimizer_unet, modules.optimizer_te, scaler, modules.ema_unet, current_step, epoch, None)
 
             if modules.ema_unet is not None:
                 modules.ema_unet.restore(modules.unet.parameters())
@@ -438,7 +443,7 @@ def run_training_loop(
         modules.ema_unet.copy_to(modules.unet.parameters())
 
     modules.pipe.save_pretrained(paths.output_dir)
-    save_training_state(paths.state_save_path, modules.optimizer, scaler, modules.ema_unet, global_step, epoch, None)
+    save_training_state(paths.state_save_path, modules.optimizer_unet, modules.optimizer_te, scaler, modules.ema_unet, global_step, epoch, None)
 
     if tb_writer is not None:
         tb_writer.flush()
