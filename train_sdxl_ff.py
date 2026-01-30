@@ -427,9 +427,6 @@ if max_grad_norm is not None:
             "max_grad_norm=0 deaktiviert Gradient Clipping (alle Gradienten auf 0 gesetzt). Meintest du None?",
             stacklevel=2,
         )
-max_grad_norm_te_multiplier = training_cfg.get("max_grad_norm_te_multiplier", 10.0)
-if max_grad_norm_te_multiplier is not None:
-    max_grad_norm_te_multiplier = float(max_grad_norm_te_multiplier)
 detect_anomaly = bool(training_cfg.get("detect_anomaly", True))
 ema_update_every = int(training_cfg.get("ema_update_every", 10) or 10)
 if ema_update_every < 1:
@@ -666,6 +663,25 @@ elif num_epochs is not None:
     total_progress_steps = steps_per_epoch * num_epochs
 else:
     total_progress_steps = None
+
+te_freeze_step = None
+te_freeze_fraction = training_cfg.get("te_freeze_fraction", 0.7)
+if te_freeze_fraction is not None:
+    try:
+        te_freeze_fraction = float(te_freeze_fraction)
+    except (TypeError, ValueError):
+        warnings.warn(f"Ungültiger te_freeze_fraction-Wert ({te_freeze_fraction}), Feature deaktiviert.", stacklevel=2)
+        te_freeze_fraction = None
+if te_freeze_fraction is not None:
+    if te_freeze_fraction <= 0.0 or te_freeze_fraction >= 1.0:
+        warnings.warn("te_freeze_fraction muss zwischen 0 und 1 liegen – Feature deaktiviert.", stacklevel=2)
+        te_freeze_fraction = None
+
+if total_progress_steps is not None and te_freeze_fraction is not None:
+    te_freeze_step = max(1, int(total_progress_steps * te_freeze_fraction))
+    run_summary.append(("text_encoder.freeze_step", te_freeze_step))
+else:
+    run_summary.append(("text_encoder.freeze_step", "disabled (num_steps/epochs missing or fraction unset)"))
 
 def encode_text(captions_batch):
     # Wir haben schon input_ids aus dem Dataset, daher hier just forward:
@@ -1086,7 +1102,6 @@ trainer_settings = TrainingLoopSettings(
     noise_offset=noise_offset,
     snr_gamma=snr_gamma,
     max_grad_norm=max_grad_norm,
-    max_grad_norm_te_multiplier=max_grad_norm_te_multiplier,
     detect_anomaly=detect_anomaly,
     ema_update_every=ema_update_every,
     num_steps=num_steps,
@@ -1099,6 +1114,7 @@ trainer_settings = TrainingLoopSettings(
     prediction_type=prediction_type,
     min_timestep=min_timestep,
     max_timestep=max_timestep,
+    te_freeze_step=te_freeze_step,
 )
 
 trainer_paths = TrainingPaths(

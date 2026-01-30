@@ -1,12 +1,12 @@
 {
   "device": "cuda",
   "teacher": {
-    "checkpoint_path": ".output/PainCraft_XL_v4_0",
-    "teacher_id": "teacher_v1",
+    "checkpoint_path": ".output/PainCraft_XL_v4_4_2",
+    "teacher_id": "teacher_v8",
     "use_bf16": true
   },
   "data": {
-    "image_dir": "./data/images",
+    "image_dir": "./data/genpics",
     "size": 1024,
     "bucket": {
       "enabled": true,
@@ -23,19 +23,20 @@
     },
     "latent_cache": {
       "enabled": true,
-      "cache_dir": "./cache/latents"
+      "cache_dir": "./cache/genpics_latents"
     }
   },
   "cache": {
     "output_dir": "./cache/teacher_predictions",
     "version": "1",
     "dtype": "fp16",
-    "base_seed": 42,
+    "base_seed": 26111983,
     "min_timestep": 0,
     "max_timestep": 1000,
     "skip_existing": true
   },
   "model": {
-    "id": null
+    "id": null,
+    "text_encoder_id": ".output/distill_student_v8"
   }
 }

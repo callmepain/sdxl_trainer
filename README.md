@@ -156,6 +156,16 @@ Während des Trainings:
 - Diffusers-Ordner (`output_dir`) kann direkt mit `StableDiffusionXLPipeline.from_pretrained(...)` geladen werden.
 - Die erzeugte `.safetensors`-Datei ist kompatibel mit ComfyUI (Ordner `ComfyUI/models/checkpoints/`).
 
+## Single-File in Diffusers-Ordner konvertieren
+
+Falls du nur eine `.safetensors`-Datei hast und wieder einen Diffusers-Ordner brauchst:
+
+```bash
+python debug/convert_single_to_diffusers.py --input /pfad/zum/model.safetensors
+```
+
+Standard-Output ist `<input>_diffusers`. Optional kannst du `--output`, `--dtype` oder `--pipeline sdxl|sd` setzen.
+
 ## Tipps
 
 - Für kleine Tests `num_steps` deutlich reduzieren, `log_every`/`checkpoint_every` entsprechend setzen.

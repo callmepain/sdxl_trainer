@@ -2,7 +2,7 @@
 Utilities for multi-teacher distillation.
 
 Key functions:
-- compute_deterministic_seed(image_id, teacher_id, base_seed) -> int
+- compute_deterministic_seed(image_id, teacher_id=None, base_seed=42) -> int
 - compute_cache_path(cache_dir, image_id, teacher_id, resolution) -> Path
 - load_teacher_unet_diffusers(checkpoint_path, device, dtype) -> UNet2DConditionModel
 - save_teacher_cache_entry() / load_teacher_cache_entry()
@@ -19,25 +19,27 @@ from safetensors.torch import load_file, save_file
 
 def compute_deterministic_seed(
     image_id: str,
-    teacher_id: str,
-    base_seed: int = 42
+    teacher_id: Optional[str] = None,
+    base_seed: int = 42,
 ) -> int:
     """
     Generate a deterministic seed for reproducible noise generation.
 
-    Uses SHA-256 hash of (image_id, teacher_id, base_seed) truncated to 32 bits.
-    This ensures the same noise is generated for the same image/teacher pair
-    across multiple runs.
+    Uses SHA-256 hash of (image_id, base_seed) truncated to 32 bits.
+    If teacher_id is provided, include it to create per-teacher noise.
 
     Args:
         image_id: Unique identifier for the image (typically relative path without extension)
-        teacher_id: Unique identifier for the teacher model
+        teacher_id: Optional identifier to make noise per-teacher
         base_seed: Base seed for additional randomization
 
     Returns:
         32-bit integer seed
     """
-    payload = f"{image_id}|{teacher_id}|{base_seed}"
+    if teacher_id is None:
+        payload = f"{image_id}|{base_seed}"
+    else:
+        payload = f"{image_id}|{teacher_id}|{base_seed}"
     hash_bytes = hashlib.sha256(payload.encode('utf-8')).digest()
     # Use first 4 bytes as seed (32-bit integer)
     seed = int.from_bytes(hash_bytes[:4], byteorder='big')

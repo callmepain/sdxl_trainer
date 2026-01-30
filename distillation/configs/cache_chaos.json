@@ -1,12 +1,12 @@
 {
   "device": "cuda",
   "teacher": {
-    "checkpoint_path": ".output/chaos_XL_v_0_3",
+    "checkpoint_path": ".output/BS4_CHAOS_XL_v2_2",
     "teacher_id": "teacher_chaos",
     "use_bf16": true
   },
   "data": {
-    "image_dir": "./data/images",
+    "image_dir": "./data/images_sorted",
     "size": 1024,
     "bucket": {
       "enabled": true,
@@ -36,6 +36,7 @@
     "skip_existing": true
   },
   "model": {
-    "id": null
+    "id": null,
+    "text_encoder_id": ".output/LMFAO_v_0_1_0"
   }
 }

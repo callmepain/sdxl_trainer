@@ -63,8 +63,9 @@ def build_teacher_cache(config_path: Path):
     cache_dtype_str = cache_cfg.get("dtype", "fp16")
     cache_dtype = torch.bfloat16 if cache_dtype_str == "bf16" else torch.float16
 
-    # Load tokenizers - prefer base model if specified, otherwise use teacher checkpoint
-    tokenizer_source = model_cfg.get("id") or checkpoint_path
+    # Load tokenizers - prefer shared TE source, then model.id, otherwise use teacher checkpoint
+    text_encoder_source = model_cfg.get("text_encoder_id")
+    tokenizer_source = text_encoder_source or model_cfg.get("id") or checkpoint_path
     print(f"Loading tokenizers from: {tokenizer_source}")
     tokenizer_1 = AutoTokenizer.from_pretrained(
         tokenizer_source, subfolder="tokenizer", use_fast=False
@@ -116,6 +117,16 @@ def build_teacher_cache(config_path: Path):
         torch_dtype=dtype,
         use_safetensors=True,
     )
+    if text_encoder_source:
+        print(f"Loading text encoders from: {text_encoder_source}")
+        from transformers import CLIPTextModel, CLIPTextModelWithProjection
+
+        pipe.text_encoder = CLIPTextModel.from_pretrained(
+            text_encoder_source, subfolder="text_encoder", torch_dtype=dtype
+        )
+        pipe.text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+            text_encoder_source, subfolder="text_encoder_2", torch_dtype=dtype
+        )
     pipe.to(device)
 
     teacher_unet = pipe.unet
@@ -177,8 +188,8 @@ def build_teacher_cache(config_path: Path):
                 # Get latents [C, H, W]
                 latents = sample["latents"].unsqueeze(0).to(device=device, dtype=dtype)
 
-                # Generate deterministic seed, noise, and timestep
-                seed = compute_deterministic_seed(image_id, teacher_id, base_seed)
+                # Generate deterministic seed, noise, and timestep (shared across teachers)
+                seed = compute_deterministic_seed(image_id, base_seed=base_seed)
                 noise = generate_deterministic_noise(
                     seed, latents.shape, device, dtype
                 )

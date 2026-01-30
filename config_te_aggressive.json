@@ -24,7 +24,6 @@
     "lr_unet": 5e-06,
     "lr_text_encoder_1": 1e-04,
     "lr_text_encoder_2": 5e-05,
-    "max_grad_norm_te_multiplier": 50.0,
     "log_every": 25,
     "checkpoint_every": 250,
     "grad_accum_steps": 2,

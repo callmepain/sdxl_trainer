@@ -139,6 +139,17 @@ def train_distillation(config_path: Path):
         torch_dtype=dtype,
         use_safetensors=True,
     )
+    text_encoder_source = student_cfg.get("text_encoder_id")
+    if text_encoder_source:
+        print(f"Loading text encoders from: {text_encoder_source}")
+        from transformers import CLIPTextModel, CLIPTextModelWithProjection
+
+        pipe.text_encoder = CLIPTextModel.from_pretrained(
+            text_encoder_source, subfolder="text_encoder", torch_dtype=dtype
+        )
+        pipe.text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+            text_encoder_source, subfolder="text_encoder_2", torch_dtype=dtype
+        )
     pipe.to(device)
 
     unet = pipe.unet
@@ -155,11 +166,12 @@ def train_distillation(config_path: Path):
 
     # Setup dataset
     print("\nSetting up dataset...")
+    tokenizer_source = text_encoder_source or student_checkpoint
     tokenizer_1 = AutoTokenizer.from_pretrained(
-        student_checkpoint, subfolder="tokenizer", use_fast=False
+        tokenizer_source, subfolder="tokenizer", use_fast=False
     )
     tokenizer_2 = AutoTokenizer.from_pretrained(
-        student_checkpoint, subfolder="tokenizer_2", use_fast=False
+        tokenizer_source, subfolder="tokenizer_2", use_fast=False
     )
 
     bucket_cfg = data_cfg.get("bucket", {})

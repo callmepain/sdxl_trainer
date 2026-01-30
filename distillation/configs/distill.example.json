@@ -6,6 +6,7 @@
   },
   "student": {
     "checkpoint_path": "stabilityai/stable-diffusion-xl-base-1.0",
+    "text_encoder_id": null,
     "use_bf16": true,
     "use_gradient_checkpointing": true,
     "use_ema": true,

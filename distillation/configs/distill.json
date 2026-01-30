@@ -1,11 +1,12 @@
 {
   "device": "cuda",
   "run": {
-    "name": "distill_student_v1",
-    "output_root": ".output/distill"
+    "name": "distill_student_v11_gamma",
+    "output_root": ".output/"
   },
   "student": {
     "checkpoint_path": "PainCraft_XL_Reforged_v1_diffusers",
+    "text_encoder_id": ".output/beta_v0_1_5",
     "use_bf16": true,
     "use_gradient_checkpointing": true,
     "use_ema": false,
@@ -14,27 +15,32 @@
   },
   "teachers": [
     {
-      "teacher_id": "teacher_v1",
+      "teacher_id": "teacher_alpha",
       "cache_dir": "./cache/teacher_predictions",
-      "weight": 0.333
+      "weight": 0.3
     },
     {
-      "teacher_id": "teacher_chaos",
+      "teacher_id": "teacher_beta",
       "cache_dir": "./cache/teacher_predictions",
-      "weight": 0.333
+      "weight": 0.4
     },
     {
-      "teacher_id": "teacher_bs4",
+      "teacher_id": "teacher_lustify",
       "cache_dir": "./cache/teacher_predictions",
-      "weight": 0.334
+      "weight": 0.15
+    },
+    {
+      "teacher_id": "teacher_juggernaut",
+      "cache_dir": "./cache/teacher_predictions",
+      "weight": 0.15
     }
   ],
   "training": {
-    "batch_size": 4,
-    "num_steps": 1000,
+    "batch_size": 8,
+    "num_steps": 2500,
     "num_epochs": null,
-    "lr": 5e-6,
-    "grad_accum_steps": 1,
+    "lr": 1e-05,
+    "grad_accum_steps": 4,
     "log_every": 0,
     "checkpoint_every": 1000,
     "max_grad_norm": 1.0,
@@ -52,7 +58,7 @@
     }
   },
   "data": {
-    "image_dir": "./data/images",
+    "image_dir": "./data/genpics",
     "size": 1024,
     "bucket": {
       "enabled": true,
@@ -70,9 +76,9 @@
     },
     "latent_cache": {
       "enabled": true,
-      "cache_dir": "./cache/latents"
+      "cache_dir": "./cache/genpics_latents"
     },
-    "num_workers": 4,
+    "num_workers": 24,
     "pin_memory": true
   },
   "cache": {

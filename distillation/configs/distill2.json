@@ -1,12 +1,13 @@
 {
     "device": "cuda",
     "run": {
-      "name": "distill_student_v1",
-      "output_root": ".output/distill"
+      "name": "ds_turbo_v1_0",
+      "output_root": ".output/"
     },
-    "student": {
-      "checkpoint_path": "PainCraft_XL_Reforged_v1_diffusers",
-      "use_bf16": true,
+  "student": {
+    "checkpoint_path": ".output/ds_1_0_8",
+    "text_encoder_id": null,
+    "use_bf16": true,
       "use_gradient_checkpointing": true,
       "use_ema": false,
       "ema_decay": 0.9999,
@@ -14,21 +15,16 @@
     },
     "teachers": [
       {
-        "teacher_id": "teacher_chaos",
+        "teacher_id": "teacher_ds",
         "cache_dir": "./cache/teacher_predictions",
-        "weight": 0.5
-      },
-      {
-        "teacher_id": "teacher_bs4",
-        "cache_dir": "./cache/teacher_predictions",
-        "weight": 0.5
+        "weight": 1.0
       }
     ],
     "training": {
-      "batch_size": 4,
-      "num_steps": 1000,
+      "batch_size": 8,
+      "num_steps": 5000,
       "num_epochs": null,
-      "lr": 1e-5,
+      "lr": 1e-05,
       "grad_accum_steps": 1,
       "log_every": 0,
       "checkpoint_every": 1000,
@@ -47,7 +43,7 @@
       }
     },
     "data": {
-      "image_dir": "./data/images",
+      "image_dir": "./data/genpics",
       "size": 1024,
       "bucket": {
         "enabled": true,

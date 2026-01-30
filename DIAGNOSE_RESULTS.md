@@ -61,10 +61,9 @@ Das Model lernt nicht effektiv - der Loss steigt sogar leicht.
    - Typische SDXL TE LRs liegen bei 1e-05 bis 5e-05
    - Deine 5e-06 ist zu klein, besonders mit Cosine Decay
 
-4. **Gradient Clipping + Multiplier**:
-   - `max_grad_norm: 1.0` für UNet
-   - `max_grad_norm_te_multiplier: 10.0` → TE Max Norm = 10.0
-   - Bei so kleinen Gradienten clippt das nicht, aber es zeigt dass TEs mehr "Spielraum" brauchen
+4. **Gradient Clipping**:
+   - `max_grad_norm: 1.0` für UNet und TEs
+   - Bei so kleinen Gradienten clippt das nicht
 
 ## Lösungen
 
@@ -104,12 +103,7 @@ Das Model lernt nicht effektiv - der Loss steigt sogar leicht.
    "min_sigma_warmup_steps": 100,
    ```
 
-6. **Höherer TE Gradient Multiplier**:
-   ```json
-   "max_grad_norm_te_multiplier": 20.0,  // Statt 10.0
-   ```
-
-7. **Evaluation aktiviert** für Monitoring:
+6. **Evaluation aktiviert** für Monitoring:
    ```json
    "eval": {
      "live": {

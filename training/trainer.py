@@ -52,7 +52,6 @@ class TrainingLoopSettings:
     noise_offset: float
     snr_gamma: Optional[float]
     max_grad_norm: Optional[float]
-    max_grad_norm_te_multiplier: float
     detect_anomaly: bool
     ema_update_every: int
     num_steps: Optional[int]
@@ -65,6 +64,7 @@ class TrainingLoopSettings:
     prediction_type: str
     min_timestep: Optional[int]
     max_timestep: Optional[int]
+    te_freeze_step: Optional[int]
 
 
 @dataclass
@@ -139,10 +139,35 @@ def run_training_loop(
     accum_counter = 0
     last_loss_value = 0.0
     last_bucket_key = None
+    te_frozen = False
 
     ema_start_step = (
         modules.lr_controller.warmup_steps if (settings.use_ema and modules.lr_controller is not None) else 0
     )
+
+    def freeze_text_encoders(current_step: int):
+        nonlocal te_frozen
+        if te_frozen:
+            return
+        # Disable grads
+        if modules.te1 is not None:
+            modules.te1.requires_grad_(False)
+            modules.te1.eval()
+        if modules.te2 is not None:
+            modules.te2.requires_grad_(False)
+            modules.te2.eval()
+        # Zero TE learning rates going forward
+        if modules.optimizer_te is not None:
+            for pg in modules.optimizer_te.param_groups:
+                pg["lr"] = 0.0
+            modules.optimizer_te.zero_grad(set_to_none=True)
+        # Also zero LR bases inside LR controller so future apply() keeps them at 0
+        if modules.lr_controller is not None:
+            for group in modules.lr_controller.param_groups:
+                if group.get("optimizer") == "te":
+                    group["base_lr"] = 0.0
+        print(f"Text-Encoder eingefroren bei step {current_step} – weitere Updates nur noch UNet.")
+        te_frozen = True
 
     def module_grad_norm(module) -> float:
         norms = []
@@ -194,15 +219,14 @@ def run_training_loop(
                         error_if_nonfinite=settings.detect_anomaly,
                     )
 
-                # Clip TEs with separate (higher) threshold to avoid over-clipping
+                # Clip TEs with same threshold as UNet
                 if modules.optimizer_te is not None:
-                    te_max_norm = settings.max_grad_norm * settings.max_grad_norm_te_multiplier
                     for pg in modules.optimizer_te.param_groups:
                         te_params = [p for p in pg["params"] if p.grad is not None]
                         if te_params:
                             clip_grad_norm_(
                                 te_params,
-                                max_norm=te_max_norm,
+                                max_norm=settings.max_grad_norm,
                                 norm_type=2.0,
                                 error_if_nonfinite=settings.detect_anomaly,
                             )
@@ -225,6 +249,13 @@ def run_training_loop(
         display_loss = float(loss_value) if loss_value is not None else 0.0
         pbar.update(1)
         pbar.set_postfix({"loss": f"{display_loss:.4f}"})
+
+        if (
+            settings.te_freeze_step is not None
+            and not te_frozen
+            and current_step >= settings.te_freeze_step
+        ):
+            freeze_text_encoders(current_step)
 
         if settings.log_every is not None and current_step % settings.log_every == 0:
             lr_summary = ""
@@ -369,8 +400,9 @@ def run_training_loop(
                     )
                     heights = widths
                 zeros = torch.zeros_like(widths)
+                # SDXL expects time IDs ordered as [h, w, crop_y, crop_x, target_h, target_w]
                 add_time_ids = torch.stack(
-                    [widths, heights, zeros, zeros, widths, heights],
+                    [heights, widths, zeros, zeros, heights, widths],
                     dim=1,
                 )
 

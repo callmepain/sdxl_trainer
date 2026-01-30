@@ -85,6 +85,9 @@ python distillation/train_distill.py --config distillation/configs/distill.json
     "min_timestep": 0,
     "max_timestep": 1000,
     "skip_existing": true
+  },
+  "model": {
+    "text_encoder_id": "stabilityai/stable-diffusion-xl-base-1.0"
   }
 }
 ```
@@ -100,6 +103,7 @@ python distillation/train_distill.py --config distillation/configs/distill.json
   },
   "student": {
     "checkpoint_path": "stabilityai/stable-diffusion-xl-base-1.0",
+    "text_encoder_id": "stabilityai/stable-diffusion-xl-base-1.0",
     "use_bf16": true,
     "use_gradient_checkpointing": true,
     "use_ema": true,
@@ -139,7 +143,7 @@ Cache files are stored at: `{cache_dir}/{teacher_id}/{hash}_{WxH}.safetensors`
 
 The system uses deterministic noise and timestep generation to ensure consistency:
 
-- **Seed**: `SHA256(image_id | teacher_id | base_seed)` truncated to 32 bits
+- **Seed**: `SHA256(image_id | base_seed)` truncated to 32 bits
 - **Timestep**: Sampled using the deterministic seed
 - **Noise**: Generated using the deterministic seed
 
@@ -183,6 +187,7 @@ Metrics logged:
 3. **Learning Rate**: Start with 5e-6, similar to regular fine-tuning
 4. **Caching on NVMe**: Cache building is I/O bound; fast storage helps
 5. **Bucketing**: Use same bucket config for cache building and training
+6. **Shared Text Encoders**: Set `model.text_encoder_id` in cache builder configs and `student.text_encoder_id` in distill config so all teachers use the same TE embeddings
 
 ## File Structure
 

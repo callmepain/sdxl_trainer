@@ -23,6 +23,13 @@ decoded_latents/
 # Daten
 data/images/
 data/*
+distillation/configs/
+babesByStableYogi_ponyV4_diffusers/*
+juggernautXL_juggXIByRundiffusion_diffusers/*
+lustifySDXLNSFW_endgame_diffusers/*
+pornmaster_proSDXLV4VAE_diffusers/*
+waiIllustriousSDXL_v160_diffusers/*
+yomama25DIllustrious_illustriousV20_diffusers/*
 
 # Lokale Config
 config.json

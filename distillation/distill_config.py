@@ -45,6 +45,7 @@ DEFAULT_CACHE_BUILDER_CONFIG = {
     "model": {
         # Base model for tokenizers (if different from teacher checkpoint)
         "id": None,  # If None, uses teacher checkpoint for tokenizers
+        "text_encoder_id": None,  # Optional: shared TE/tokenizer source
     },
 }
 
@@ -57,6 +58,7 @@ DEFAULT_DISTILL_CONFIG = {
     },
     "student": {
         "checkpoint_path": None,  # Starting checkpoint for student (required)
+        "text_encoder_id": None,  # Optional: override TE/tokenizers for output
         "use_bf16": True,
         "use_gradient_checkpointing": True,
         "use_ema": True,

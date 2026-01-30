@@ -258,15 +258,7 @@ Da TE1 strukturell 24x schwächere Gradienten bekommt, muss die Learning Rate di
 
 **Grund:** Stabilisiert Training bei höheren TE Learning Rates
 
-#### 3. Höherer Gradient Clipping Multiplier
-```json
-"max_grad_norm": 1.0,
-"max_grad_norm_te_multiplier": 50.0,  // statt 10.0
-```
-
-**Grund:** Gibt TE1 mehr Spielraum bei höheren LRs
-
-#### 4. Gradient Checkpointing deaktivieren (optional)
+#### 3. Gradient Checkpointing deaktivieren (optional)
 ```json
 "use_gradient_checkpointing": false,
 ```
@@ -478,7 +470,7 @@ Base: SDXL Base 1.0
 
 **Mögliche Ursachen:**
 1. LR zu niedrig → Erhöhe auf 1e-04 oder 2e-04
-2. Gradient Clipping zu aggressiv → Erhöhe `max_grad_norm_te_multiplier`
+2. Gradient Clipping zu aggressiv → Erhöhe `max_grad_norm`
 3. Gradient Checkpointing behindert Flow → Deaktiviere temporär
 4. Model saturiert → Probiere frisches Base Model
 
@@ -533,7 +525,6 @@ Base: SDXL Base 1.0
     "lr_text_encoder_1": 1e-04,
     "lr_text_encoder_2": 1e-05,
     "max_grad_norm": 1.0,
-    "max_grad_norm_te_multiplier": 50.0,
     "snr_gamma": 5.0,
     "noise_offset": 0.05,
     "min_sigma": 0.01,
