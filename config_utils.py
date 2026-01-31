@@ -21,6 +21,8 @@ DEFAULT_CONFIG = {
         "train_text_encoder_2": False,
         "use_torch_compile": False,
         "torch_compile_kwargs": {},
+        "attention_backend": "auto",  # "auto", "sage", "flash", or "sdpa"
+        "sage_min_seq_length": 1024,  # Min seq length to use SageAttention in auto mode
     },
     "training": {
         "output_dir": None,

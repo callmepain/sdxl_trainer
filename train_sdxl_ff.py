@@ -74,185 +74,11 @@ CONFIG_PATH = Path("config.json")
 
 cfg = load_config(CONFIG_PATH)
 
-flash_attn_func = None
-flash_attn_backend = None
-flash_attn_supports_dropout = False
-flash_attn_supports_softmax_scale = False
+# Import unified attention module
+from attention import get_attention_processor, AVAILABLE_BACKENDS, print_backend_status
 
-try:
-    from flash_attn_interface import flash_attn_func  # FlashAttention-3 wheels expose this module
-    flash_attn_backend = "flash_attn_interface"
-except ImportError:
-    try:
-        from flash_attn.flash_attn_interface import flash_attn_func  # FlashAttention<=2.x
-        flash_attn_backend = "flash_attn.flash_attn_interface"
-    except ImportError:
-        try:
-            from flash_attn import flash_attn_func  # Legacy API
-            flash_attn_backend = "flash_attn"
-        except ImportError:
-            flash_attn_func = None
-
-if flash_attn_func is None:
-    warnings.warn(
-        "FlashAttention wurde nicht gefunden. Verwende Standard-Attention – aktiviere die richtige venv oder installiere flash-attn-3.",
-        stacklevel=2,
-    )
-else:
-    import inspect
-
-    try:
-        signature = inspect.signature(flash_attn_func)
-        flash_attn_supports_dropout = "dropout_p" in signature.parameters
-        flash_attn_supports_softmax_scale = "softmax_scale" in signature.parameters
-    except (ValueError, TypeError):
-        pass
-
-    print(
-        f"FlashAttention aktiviert (Backend: {flash_attn_backend}, "
-        f"dropout={'ja' if flash_attn_supports_dropout else 'nein'}, "
-        f"scale_kw={'ja' if flash_attn_supports_softmax_scale else 'nein'})"
-    )
-
-
-class FlashAttnProcessor:
-    """Wrapper, der automatisch auf FlashAttention-3 fällt, falls verfügbar."""
-
-    SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
-
-    def __init__(self):
-        self._warned = False
-        self._dropout_warned = False
-
-    def _can_use_flash(self, hidden_states, attention_mask, head_dim):
-        if flash_attn_func is None:
-            return False
-        if attention_mask is not None:
-            return False
-        if hidden_states.device.type != "cuda":
-            return False
-        if hidden_states.dtype not in self.SUPPORTED_DTYPES:
-            return False
-        if head_dim > 256 or head_dim % 8 != 0:
-            return False
-        return True
-
-    def __call__(
-        self,
-        attn,
-        hidden_states,
-        encoder_hidden_states=None,
-        attention_mask=None,
-        temb=None,
-        *args,
-        **kwargs,
-    ):
-        if len(args) > 0 or kwargs.get("scale", None) is not None:
-            deprecation_message = (
-                "Das `scale`-Argument wird ignoriert. Bitte entferne die Übergabe."
-            )
-            warnings.warn(deprecation_message, stacklevel=2)
-
-        residual = hidden_states
-        if attn.spatial_norm is not None:
-            hidden_states = attn.spatial_norm(hidden_states, temb)
-
-        input_ndim = hidden_states.ndim
-        height = width = channel = None
-        if input_ndim == 4:
-            batch_size, channel, height, width = hidden_states.shape
-            hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
-
-        batch_size, sequence_length, _ = (
-            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
-        )
-
-        if attention_mask is not None:
-            attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
-            attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
-
-        if attn.group_norm is not None:
-            hidden_states = attn.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
-
-        query = attn.to_q(hidden_states)
-
-        if encoder_hidden_states is None:
-            encoder_hidden_states = hidden_states
-        elif attn.norm_cross:
-            encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
-
-        key = attn.to_k(encoder_hidden_states)
-        value = attn.to_v(encoder_hidden_states)
-
-        head_dim = query.shape[-1] // attn.heads
-
-        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
-        if attn.norm_q is not None:
-            query = attn.norm_q(query)
-        if attn.norm_k is not None:
-            key = attn.norm_k(key)
-
-        use_flash = self._can_use_flash(hidden_states, attention_mask, head_dim)
-
-        if use_flash:
-            try:
-                flash_query = query.transpose(1, 2).contiguous()
-                flash_key = key.transpose(1, 2).contiguous()
-                flash_value = value.transpose(1, 2).contiguous()
-                dropout_p = attn.dropout if attn.training else 0.0
-                attn_scale = attn.scale if getattr(attn, "scale_qk", True) else None
-                flash_kwargs = {"causal": False}
-                if attn_scale is not None and flash_attn_supports_softmax_scale:
-                    flash_kwargs["softmax_scale"] = attn_scale
-                if dropout_p and dropout_p > 0.0:
-                    if flash_attn_supports_dropout:
-                        flash_kwargs["dropout_p"] = dropout_p
-                    elif not self._dropout_warned:
-                        warnings.warn(
-                            "FlashAttention-Backend unterstützt kein Dropout. Dropout wird ignoriert.",
-                            stacklevel=2,
-                        )
-                        self._dropout_warned = True
-                flash_hidden_states = flash_attn_func(
-                    flash_query,
-                    flash_key,
-                    flash_value,
-                    **flash_kwargs,
-                )
-                hidden_states = flash_hidden_states.transpose(1, 2)
-            except RuntimeError as err:
-                if not self._warned:
-                    warnings.warn(
-                        f"FlashAttention deaktiviert, fallback auf SDP: {err}",
-                        stacklevel=2,
-                    )
-                    self._warned = True
-                hidden_states = torch.nn.functional.scaled_dot_product_attention(
-                    query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
-                )
-        else:
-            hidden_states = torch.nn.functional.scaled_dot_product_attention(
-                query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
-            )
-
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
-        hidden_states = hidden_states.to(query.dtype)
-
-        hidden_states = attn.to_out[0](hidden_states)
-        hidden_states = attn.to_out[1](hidden_states)
-
-        if input_ndim == 4:
-            hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
-
-        if attn.residual_connection:
-            hidden_states = hidden_states + residual
-
-        hidden_states = hidden_states / attn.rescale_output_factor
-
-        return hidden_states
+# Print attention backend status at startup
+print_backend_status()
 
 device = cfg["device"]
 
@@ -907,7 +733,16 @@ unet.requires_grad_(True)
 te1.requires_grad_(train_text_encoder_1)
 te2.requires_grad_(train_text_encoder_2)
 
-unet.set_attn_processor(FlashAttnProcessor())
+# Setup attention processor based on config
+attention_backend = model_cfg.get("attention_backend", "auto")
+sage_min_seq_length = model_cfg.get("sage_min_seq_length", 1024)
+attn_processor = get_attention_processor(
+    backend=attention_backend,
+    sage_min_seq_length=sage_min_seq_length,
+)
+unet.set_attn_processor(attn_processor)
+run_summary.append(("attention.backend", attention_backend))
+run_summary.append(("attention.sage_min_seq", str(sage_min_seq_length)))
 
 param_total, param_trainable = _count_parameters([unet, vae, te1, te2])
 run_summary.append(("parameters.total", f"{param_total:,}"))

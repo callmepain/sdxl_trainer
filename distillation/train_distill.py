@@ -20,7 +20,7 @@ from typing import Dict, Optional
 
 import bitsandbytes as bnb
 import torch
-from diffusers import DDPMScheduler, StableDiffusionXLPipeline
+from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionXLPipeline, UNet2DConditionModel
 from diffusers.training_utils import EMAModel
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dataset import SimpleCaptionDataset, BucketBatchSampler
 from optim_utils import LearningRateController, compute_grad_norm
 from state_utils import save_training_state
+from attention import get_attention_processor, print_backend_status
 
 from distillation.distill_config import load_distill_config
 from distillation.distill_dataset import DistillationDataset, distillation_collate_fn
@@ -107,13 +108,23 @@ def train_distillation(config_path: Path):
         raise ValueError(
             "No teachers configured. Add at least one teacher to 'teachers' list."
         )
-    if not student_cfg.get("checkpoint_path"):
-        raise ValueError("student.checkpoint_path is required")
+
+    init_random = student_cfg.get("init_random", False)
+    if not init_random and not student_cfg.get("checkpoint_path"):
+        raise ValueError("student.checkpoint_path is required (or set init_random: true)")
+    if init_random and not student_cfg.get("text_encoder_id"):
+        raise ValueError("student.text_encoder_id is required when using init_random")
+
+    # Print attention backend status
+    print_backend_status()
 
     print("=" * 60)
     print("Multi-Teacher Distillation Training")
     print("=" * 60)
-    print(f"Student: {student_cfg['checkpoint_path']}")
+    if init_random:
+        print(f"Student: RANDOM INITIALIZATION (config from {student_cfg.get('model_config_source', 'stabilityai/stable-diffusion-xl-base-1.0')})")
+    else:
+        print(f"Student: {student_cfg['checkpoint_path']}")
     print(f"Teachers ({len(teacher_configs)}):")
     for tc in teacher_configs:
         print(f"  - {tc['teacher_id']} (weight={tc.get('weight', 1.0)})")
@@ -131,30 +142,79 @@ def train_distillation(config_path: Path):
     print(f"Dtype: {'BF16' if use_bf16 else 'FP16'}")
 
     # Load student model
-    student_checkpoint = Path(student_cfg["checkpoint_path"]).expanduser()
-    print(f"\nLoading student model from: {student_checkpoint}")
-
-    pipe = StableDiffusionXLPipeline.from_pretrained(
-        student_checkpoint,
-        torch_dtype=dtype,
-        use_safetensors=True,
-    )
     text_encoder_source = student_cfg.get("text_encoder_id")
-    if text_encoder_source:
-        print(f"Loading text encoders from: {text_encoder_source}")
+
+    if init_random:
+        # Create UNet with random weights from config
+        model_config_source = student_cfg.get("model_config_source", "stabilityai/stable-diffusion-xl-base-1.0")
+        print(f"\nCreating random UNet from config: {model_config_source}")
+
+        # Load UNet config and create fresh model with random weights
+        unet_config = UNet2DConditionModel.load_config(model_config_source, subfolder="unet")
+        unet = UNet2DConditionModel.from_config(unet_config)
+        unet = unet.to(device=device, dtype=dtype)
+        print(f"  UNet parameters: {sum(p.numel() for p in unet.parameters()):,}")
+
+        # Load other components from text_encoder_source
+        print(f"Loading VAE and text encoders from: {text_encoder_source}")
         from transformers import CLIPTextModel, CLIPTextModelWithProjection
 
-        pipe.text_encoder = CLIPTextModel.from_pretrained(
+        vae = AutoencoderKL.from_pretrained(
+            text_encoder_source, subfolder="vae", torch_dtype=dtype
+        )
+        text_encoder = CLIPTextModel.from_pretrained(
             text_encoder_source, subfolder="text_encoder", torch_dtype=dtype
         )
-        pipe.text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+        text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
             text_encoder_source, subfolder="text_encoder_2", torch_dtype=dtype
         )
-    pipe.to(device)
 
-    unet = pipe.unet
+        # Build pipeline for saving (VAE/TE not used during training since we use cached latents)
+        pipe = StableDiffusionXLPipeline(
+            vae=vae,
+            text_encoder=text_encoder,
+            text_encoder_2=text_encoder_2,
+            unet=unet,
+            scheduler=DDPMScheduler.from_pretrained(text_encoder_source, subfolder="scheduler"),
+            tokenizer=None,  # Will load separately
+            tokenizer_2=None,
+        )
+        pipe.to(device)
+    else:
+        # Load from existing checkpoint
+        student_checkpoint = Path(student_cfg["checkpoint_path"]).expanduser()
+        print(f"\nLoading student model from: {student_checkpoint}")
+
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            student_checkpoint,
+            torch_dtype=dtype,
+            use_safetensors=True,
+        )
+        if text_encoder_source:
+            print(f"Loading text encoders from: {text_encoder_source}")
+            from transformers import CLIPTextModel, CLIPTextModelWithProjection
+
+            pipe.text_encoder = CLIPTextModel.from_pretrained(
+                text_encoder_source, subfolder="text_encoder", torch_dtype=dtype
+            )
+            pipe.text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+                text_encoder_source, subfolder="text_encoder_2", torch_dtype=dtype
+            )
+        pipe.to(device)
+        unet = pipe.unet
+
     unet.train()
     unet.requires_grad_(True)
+
+    # Setup attention processor
+    attention_backend = student_cfg.get("attention_backend", "auto")
+    sage_min_seq_length = student_cfg.get("sage_min_seq_length", 1024)
+    attn_processor = get_attention_processor(
+        backend=attention_backend,
+        sage_min_seq_length=sage_min_seq_length,
+    )
+    unet.set_attn_processor(attn_processor)
+    print(f"Attention backend: {attention_backend} (sage_min_seq={sage_min_seq_length})")
 
     if student_cfg.get("use_gradient_checkpointing", True):
         if hasattr(unet, "enable_gradient_checkpointing"):
@@ -166,7 +226,10 @@ def train_distillation(config_path: Path):
 
     # Setup dataset
     print("\nSetting up dataset...")
-    tokenizer_source = text_encoder_source or student_checkpoint
+    if init_random:
+        tokenizer_source = text_encoder_source
+    else:
+        tokenizer_source = text_encoder_source or student_checkpoint
     tokenizer_1 = AutoTokenizer.from_pretrained(
         tokenizer_source, subfolder="tokenizer", use_fast=False
     )

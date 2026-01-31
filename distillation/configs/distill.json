@@ -1,10 +1,12 @@
 {
   "device": "cuda",
   "run": {
-    "name": "distill_student_v11_gamma",
+    "name": "distill_student_v12_gamma",
     "output_root": ".output/"
   },
   "student": {
+    "init_random": false,
+    "model_config_source": "PainCraft_XL_Reforged_v1_diffusers",
     "checkpoint_path": "PainCraft_XL_Reforged_v1_diffusers",
     "text_encoder_id": ".output/beta_v0_1_5",
     "use_bf16": true,
@@ -37,7 +39,7 @@
   ],
   "training": {
     "batch_size": 8,
-    "num_steps": 2500,
+    "num_steps": 2000,
     "num_epochs": null,
     "lr": 1e-05,
     "grad_accum_steps": 4,

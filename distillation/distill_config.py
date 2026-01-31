@@ -57,13 +57,17 @@ DEFAULT_DISTILL_CONFIG = {
         "output_root": ".output/distill",
     },
     "student": {
-        "checkpoint_path": None,  # Starting checkpoint for student (required)
-        "text_encoder_id": None,  # Optional: override TE/tokenizers for output
+        "checkpoint_path": None,  # Starting checkpoint for student (or None if init_random)
+        "init_random": False,  # If True, initialize UNet with random weights
+        "model_config_source": "stabilityai/stable-diffusion-xl-base-1.0",  # Source for UNet config when init_random
+        "text_encoder_id": None,  # Optional: override TE/tokenizers (required if init_random)
         "use_bf16": True,
         "use_gradient_checkpointing": True,
         "use_ema": True,
         "ema_decay": 0.9999,
         "ema_update_every": 10,
+        "attention_backend": "auto",  # "auto", "sage", "flash", or "sdpa"
+        "sage_min_seq_length": 1024,  # Min seq length for SageAttention in auto mode
     },
     "teachers": [
         # List of teacher configurations
