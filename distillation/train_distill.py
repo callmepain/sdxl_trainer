@@ -115,9 +115,6 @@ def train_distillation(config_path: Path):
     if init_random and not student_cfg.get("text_encoder_id"):
         raise ValueError("student.text_encoder_id is required when using init_random")
 
-    # Print attention backend status
-    print_backend_status()
-
     print("=" * 60)
     print("Multi-Teacher Distillation Training")
     print("=" * 60)
@@ -214,7 +211,7 @@ def train_distillation(config_path: Path):
         sage_min_seq_length=sage_min_seq_length,
     )
     unet.set_attn_processor(attn_processor)
-    print(f"Attention backend: {attention_backend} (sage_min_seq={sage_min_seq_length})")
+    print_backend_status(configured_backend=attention_backend, sage_min_seq_length=sage_min_seq_length)
 
     if student_cfg.get("use_gradient_checkpointing", True):
         if hasattr(unet, "enable_gradient_checkpointing"):

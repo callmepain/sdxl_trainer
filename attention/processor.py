@@ -460,14 +460,45 @@ def get_attention_processor(
     )
 
 
-def print_backend_status():
-    """Print available attention backends and their status."""
+def print_backend_status(configured_backend: Optional[str] = None, sage_min_seq_length: Optional[int] = None):
+    """Print available attention backends and their status.
+
+    Args:
+        configured_backend: The backend that was configured (e.g., "auto", "sage", "flash", "sdpa").
+            If provided, also shows which backend is currently active.
+        sage_min_seq_length: The minimum sequence length for SageAttention in auto mode.
+    """
     print("Attention Backend Status:")
     print(f"  SageAttention: {'available' if AVAILABLE_BACKENDS['sage'] else 'not installed'}")
     if AVAILABLE_BACKENDS["flash"]:
         print(f"  FlashAttention: available (backend: {flash_attn_backend})")
-        print(f"    - dropout support: {flash_attn_supports_dropout}")
-        print(f"    - scale kwarg: {flash_attn_supports_softmax_scale}")
     else:
         print("  FlashAttention: not installed")
     print(f"  PyTorch SDPA: available (always)")
+
+    if configured_backend is not None:
+        # Determine which backend will actually be used
+        if configured_backend == "auto":
+            if AVAILABLE_BACKENDS["sage"] and AVAILABLE_BACKENDS["flash"]:
+                threshold = sage_min_seq_length if sage_min_seq_length is not None else SAGE_MIN_SEQ_LENGTH
+                # For SDXL self-attention at 1024x1024, seq_len = 4096 (64x64 latent)
+                # So SageAttention will be used for most self-attention ops
+                print(f"  Using: SageAttention (primary) + FlashAttention (seq < {threshold})")
+            elif AVAILABLE_BACKENDS["sage"]:
+                print("  Using: SageAttention")
+            elif AVAILABLE_BACKENDS["flash"]:
+                print("  Using: FlashAttention")
+            else:
+                print("  Using: PyTorch SDPA")
+        elif configured_backend == "sage":
+            if AVAILABLE_BACKENDS["sage"]:
+                print("  Using: SageAttention")
+            else:
+                print("  Using: PyTorch SDPA (SageAttention not available)")
+        elif configured_backend == "flash":
+            if AVAILABLE_BACKENDS["flash"]:
+                print("  Using: FlashAttention")
+            else:
+                print("  Using: PyTorch SDPA (FlashAttention not available)")
+        else:
+            print("  Using: PyTorch SDPA")

@@ -77,9 +77,6 @@ cfg = load_config(CONFIG_PATH)
 # Import unified attention module
 from attention import get_attention_processor, AVAILABLE_BACKENDS, print_backend_status
 
-# Print attention backend status at startup
-print_backend_status()
-
 device = cfg["device"]
 
 run_cfg = cfg.get("run", {})
@@ -741,6 +738,7 @@ attn_processor = get_attention_processor(
     sage_min_seq_length=sage_min_seq_length,
 )
 unet.set_attn_processor(attn_processor)
+print_backend_status(configured_backend=attention_backend, sage_min_seq_length=sage_min_seq_length)
 run_summary.append(("attention.backend", attention_backend))
 run_summary.append(("attention.sage_min_seq", str(sage_min_seq_length)))
 
