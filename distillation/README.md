@@ -13,9 +13,19 @@ This approach allows training from multiple teachers without loading them all in
 
 ## Quick Start
 
-### 1. Build Teacher Caches
+### 1. Build Latent Cache
 
-First, build the prediction cache for each teacher model:
+Build the VAE latent cache first. This standalone script only loads the VAE (no UNet/optimizer needed):
+
+```bash
+python distillation/build_latent_cache.py --config distillation/configs/cache_alpha.json
+```
+
+Uses the same config as `build_teacher_cache.py`. The VAE source is resolved from: `model.id` → `model.text_encoder_id` → `teacher.checkpoint_path`.
+
+### 2. Build Teacher Caches
+
+Build the prediction cache for each teacher model:
 
 ```bash
 # Create config for teacher 1
@@ -23,14 +33,14 @@ cp distillation/configs/cache_builder.example.json distillation/configs/cache_v8
 # Edit cache_v8.json: set teacher.checkpoint_path and teacher.teacher_id
 
 # Build cache
-python distillation/build_teacher_cache.py --config distillation/configs/cache_v8.json
+python distillation/build_teacher_cache.py --config distillation/configs/cache_gamma.json
 
 # Repeat for other teachers...
 python distillation/build_teacher_cache.py --config distillation/configs/cache_chaos.json
 python distillation/build_teacher_cache.py --config distillation/configs/cache_bs4.json
 ```
 
-### 2. Verify Caches
+### 3. Verify Caches
 
 Verify the caches are complete and valid:
 
@@ -40,7 +50,7 @@ python distillation/verify_cache.py --cache-dir ./cache/teacher_predictions/teac
 python distillation/verify_cache.py --cache-dir ./cache/teacher_predictions/teacher_bs4
 ```
 
-### 3. Train Student Model
+### 4. Train Student Model
 
 Configure and run distillation training:
 
@@ -156,7 +166,7 @@ This ensures:
 
 Before running distillation:
 
-1. **Latent Cache Required**: The existing latent cache (VAE-encoded images) must be built first by running normal training
+1. **Latent Cache Required**: Build the VAE latent cache first with `build_latent_cache.py`
 2. **Teacher Checkpoints**: Teacher models must be in diffusers format (folder with `unet/`, `text_encoder/`, etc.)
 3. **Matching Resolutions**: Cache building must use the same bucket resolutions as training
 
@@ -194,7 +204,8 @@ Metrics logged:
 ```
 distillation/
 ├── __init__.py
-├── build_teacher_cache.py    # Cache builder script
+├── build_latent_cache.py     # Standalone VAE latent cache builder
+├── build_teacher_cache.py    # Teacher prediction cache builder
 ├── train_distill.py          # Distillation trainer
 ├── verify_cache.py           # Cache verification utility
 ├── distill_utils.py          # Shared utilities

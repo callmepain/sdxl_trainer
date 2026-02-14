@@ -131,6 +131,7 @@ class AttentionProcessor:
         attention_mask: Optional[torch.Tensor],
         head_dim: int,
         seq_length: int,
+        is_cross_attention: bool = False,
     ) -> str:
         """Select the best backend for the given inputs."""
 
@@ -140,17 +141,29 @@ class AttentionProcessor:
         has_mask = attention_mask is not None
         valid_head_dim = head_dim <= 256 and head_dim % 8 == 0
 
+        # SageAttention does not propagate gradients to K/V inputs in its
+        # backward pass.  For cross-attention the K/V come from the text
+        # encoders, so using Sage there blocks TE gradient flow entirely.
+        # Always avoid Sage for cross-attention during training.
+        sage_allowed = not (is_cross_attention and hidden_states.requires_grad)
+
         # Explicit backend selection (non-auto)
         if self.backend != "auto":
             if self.backend == "sage":
-                if not AVAILABLE_BACKENDS["sage"]:
+                if not AVAILABLE_BACKENDS["sage"] or not sage_allowed:
+                    # fall through to flash / sdpa
+                    pass
+                elif not is_cuda or not is_supported_dtype:
                     return "sdpa"
-                if not is_cuda or not is_supported_dtype:
-                    return "sdpa"
-                if has_mask:
+                elif has_mask:
                     # SageAttention doesn't support attention masks
                     return "sdpa"
-                return "sage"
+                else:
+                    return "sage"
+                # sage was requested but disallowed for cross-attn – try flash
+                if AVAILABLE_BACKENDS["flash"] and is_cuda and is_supported_dtype and valid_head_dim and not has_mask:
+                    return "flash"
+                return "sdpa"
 
             elif self.backend == "flash":
                 if not AVAILABLE_BACKENDS["flash"]:
@@ -172,16 +185,16 @@ class AttentionProcessor:
             # Only SDPA supports attention masks
             return "sdpa"
 
-        # For long sequences, prefer SageAttention
-        if seq_length >= self.sage_min_seq_length and AVAILABLE_BACKENDS["sage"]:
+        # For long sequences, prefer SageAttention (self-attention only)
+        if seq_length >= self.sage_min_seq_length and AVAILABLE_BACKENDS["sage"] and sage_allowed:
             return "sage"
 
         # For shorter sequences, prefer FlashAttention
         if AVAILABLE_BACKENDS["flash"] and valid_head_dim:
             return "flash"
 
-        # SageAttention as secondary option for short sequences
-        if AVAILABLE_BACKENDS["sage"]:
+        # SageAttention as secondary option for short sequences (self-attention only)
+        if AVAILABLE_BACKENDS["sage"] and sage_allowed:
             return "sage"
 
         return "sdpa"
@@ -336,6 +349,7 @@ class AttentionProcessor:
             ).transpose(1, 2)
 
         # Compute Q, K, V
+        is_cross_attention = encoder_hidden_states is not None
         query = attn.to_q(hidden_states)
 
         if encoder_hidden_states is None:
@@ -366,7 +380,8 @@ class AttentionProcessor:
 
         # Select and run attention backend
         selected_backend = self._select_backend(
-            hidden_states, attention_mask, head_dim, seq_length
+            hidden_states, attention_mask, head_dim, seq_length,
+            is_cross_attention=is_cross_attention,
         )
 
         dropout_p = attn.dropout if attn.training else 0.0

@@ -1,3 +1,5 @@
+import atexit
+import subprocess
 import warnings
 import json
 import math
@@ -31,7 +33,7 @@ warnings.filterwarnings(
     category=UserWarning,
     module="torchsde._brownian.brownian_interval",
 )
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from diffusers import (
     AutoencoderKL,
     StableDiffusionXLPipeline,
@@ -587,6 +589,46 @@ def _resolve_cache_dtype(value, default_dtype):
     raise ValueError(f"Unbekannter Latent-Cache-Datentyp: {value}")
 
 
+def _resolve_non_negative_int(value, default, field_name):
+    if value is None:
+        return default
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError):
+        warnings.warn(
+            f"Ungültiger Wert für `{field_name}` ({value}), fallback auf {default}.",
+            stacklevel=2,
+        )
+        return default
+    if resolved < 0:
+        warnings.warn(
+            f"`{field_name}` muss >= 0 sein, erhalten: {resolved}. fallback auf {default}.",
+            stacklevel=2,
+        )
+        return default
+    return resolved
+
+
+class _LatentCacheBuildDataset(Dataset):
+    def __init__(self, source_dataset, dataset_indices):
+        self.source_dataset = source_dataset
+        self.dataset_indices = list(dataset_indices)
+
+    def __len__(self):
+        return len(self.dataset_indices)
+
+    def __getitem__(self, local_index):
+        dataset_index = self.dataset_indices[local_index]
+        pixel_values = self.source_dataset.load_image_tensor_for_cache(dataset_index)
+        return dataset_index, pixel_values
+
+
+def _collate_latent_build_samples(samples):
+    batch_indices = torch.tensor([int(sample[0]) for sample in samples], dtype=torch.long)
+    pixel_batch = torch.stack([sample[1] for sample in samples], dim=0)
+    return batch_indices, pixel_batch
+
+
 def ensure_latent_cache(dataset, cache_cfg):
     if not getattr(dataset, "latent_cache_enabled", False):
         return
@@ -598,10 +640,53 @@ def ensure_latent_cache(dataset, cache_cfg):
         print("Latent-Cache: bestehende Dateien werden verwendet.")
         return
 
-    build_batch_size = max(1, int(cache_cfg.get("build_batch_size", 1)))
+    build_batch_size = max(
+        1,
+        _resolve_non_negative_int(
+            cache_cfg.get("build_batch_size", 1),
+            1,
+            "data.latent_cache.build_batch_size",
+        ),
+    )
     cache_dtype = _resolve_cache_dtype(cache_cfg.get("dtype"), dtype)
+    default_workers = _resolve_non_negative_int(
+        data_cfg.get("num_workers", 4),
+        4,
+        "data.num_workers",
+    )
+    build_num_workers = _resolve_non_negative_int(
+        cache_cfg.get("build_num_workers"),
+        default_workers,
+        "data.latent_cache.build_num_workers",
+    )
+    build_pin_memory_cfg = cache_cfg.get("build_pin_memory")
+    if build_pin_memory_cfg is None:
+        build_pin_memory = bool(data_cfg.get("pin_memory", True))
+    else:
+        build_pin_memory = bool(build_pin_memory_cfg)
+    build_prefetch_factor = cache_cfg.get("build_prefetch_factor")
+    if build_prefetch_factor is not None:
+        try:
+            build_prefetch_factor = int(build_prefetch_factor)
+        except (TypeError, ValueError):
+            warnings.warn(
+                f"Ungültiger build_prefetch_factor-Wert ({build_prefetch_factor}), Option wird ignoriert.",
+                stacklevel=2,
+            )
+            build_prefetch_factor = None
+        else:
+            if build_prefetch_factor < 1:
+                warnings.warn(
+                    f"build_prefetch_factor muss >= 1 sein (erhalten: {build_prefetch_factor}), Option wird ignoriert.",
+                    stacklevel=2,
+                )
+                build_prefetch_factor = None
     total = len(missing)
-    print(f"Latent-Cache: Generiere {total} Einträge in {dataset.latent_cache_dir} ...")
+    print(
+        "Latent-Cache: Generiere "
+        f"{total} Einträge in {dataset.latent_cache_dir} "
+        f"(batch={build_batch_size}, workers={build_num_workers}) ..."
+    )
 
     vae_local = AutoencoderKL.from_pretrained(model_load_path, subfolder="vae", torch_dtype=vae_dtype)
     vae_local.to(device=device, dtype=vae_dtype)
@@ -622,26 +707,55 @@ def ensure_latent_cache(dataset, cache_cfg):
             bucket_key = sample_buckets[idx]
         bucket_groups.setdefault(bucket_key, []).append(idx)
 
+    cache_dataset = _LatentCacheBuildDataset(dataset, missing)
+    local_index_by_dataset_idx = {
+        dataset_idx: local_idx for local_idx, dataset_idx in enumerate(missing)
+    }
+    cache_batches = []
+    for idx_list in bucket_groups.values():
+        for start in range(0, len(idx_list), build_batch_size):
+            dataset_batch_indices = idx_list[start : start + build_batch_size]
+            cache_batches.append(
+                [local_index_by_dataset_idx[idx] for idx in dataset_batch_indices]
+            )
+
+    cache_loader_kwargs = {
+        "batch_sampler": cache_batches,
+        "num_workers": build_num_workers,
+        "pin_memory": build_pin_memory,
+        "collate_fn": _collate_latent_build_samples,
+    }
+    if build_num_workers > 0:
+        cache_loader_kwargs["persistent_workers"] = bool(
+            cache_cfg.get("build_persistent_workers", True)
+        )
+        if build_prefetch_factor is not None:
+            cache_loader_kwargs["prefetch_factor"] = build_prefetch_factor
+    cache_loader = DataLoader(cache_dataset, **cache_loader_kwargs)
+
     progress_bar = tqdm(total=total, desc="Latent Cache", unit="img")
+    use_non_blocking_copy = build_pin_memory and isinstance(device, str) and device.startswith("cuda")
     try:
-        for bucket_key, idx_list in bucket_groups.items():
-            for start in range(0, len(idx_list), build_batch_size):
-                batch_indices = idx_list[start : start + build_batch_size]
-                pixel_tensors = [
-                    dataset.load_image_tensor_for_cache(idx) for idx in batch_indices
-                ]
-                pixel_batch = torch.stack(pixel_tensors).to(device=device, dtype=vae_dtype)
+        with torch.inference_mode():
+            for batch_indices, pixel_batch in cache_loader:
+                pixel_batch = pixel_batch.to(
+                    device=device,
+                    dtype=vae_dtype,
+                    non_blocking=use_non_blocking_copy,
+                )
                 latents_batch = build_latents(pixel_batch)
                 latents_batch = latents_batch.to(cache_dtype).cpu()
-                for idx, latent_tensor in zip(batch_indices, latents_batch):
-                    dataset.save_latent(idx, latent_tensor)
-                progress_bar.update(len(batch_indices))
+                for idx, latent_tensor in zip(batch_indices.tolist(), latents_batch):
+                    dataset.save_latent(int(idx), latent_tensor)
+                progress_bar.update(int(batch_indices.shape[0]))
     finally:
         progress_bar.close()
+        del cache_loader
 
     vae_local.cpu()
     del vae_local
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     dataset.refresh_latent_cache_state()
     dataset.activate_latent_cache()
@@ -903,7 +1017,29 @@ elif min_sigma is not None:
     print("Min-Sigma-Konfiguration erkannt, aber Enforcement ist deaktiviert (Warmup oder Grenzwert unwirksam).")
 
 
-# 9) Training Loop
+# 9) GPU Compute Mode Lock & Training Loop
+
+_GPU_INDEX = "1"  # RTX 5090
+
+
+def _set_gpu_compute_mode(mode: str):
+    """Set GPU compute mode via nvidia-smi (requires passwordless sudo)."""
+    try:
+        subprocess.run(
+            ["sudo", "nvidia-smi", "-i", _GPU_INDEX, "-c", mode],
+            check=True, capture_output=True, text=True,
+        )
+        print(f"GPU {_GPU_INDEX} Compute-Modus: {mode}")
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        warnings.warn(f"nvidia-smi Compute-Modus konnte nicht gesetzt werden: {exc}", stacklevel=2)
+
+
+def _reset_gpu_compute_mode():
+    _set_gpu_compute_mode("DEFAULT")
+
+
+_set_gpu_compute_mode("EXCLUSIVE_PROCESS")
+atexit.register(_reset_gpu_compute_mode)
 
 trainer_modules = TrainerModules(
     pipe=pipe,

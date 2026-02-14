@@ -71,7 +71,11 @@
       "enabled": false,
       "cache_dir": "./cache/latents",
       "dtype": "auto",
-      "build_batch_size": 1
+      "build_batch_size": 1,
+      "build_num_workers": null,
+      "build_pin_memory": null,
+      "build_prefetch_factor": null,
+      "build_persistent_workers": true
     }
   },
   "optimizer": {

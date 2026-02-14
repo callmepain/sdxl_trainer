@@ -90,6 +90,10 @@ DEFAULT_CONFIG = {
             "cache_dir": "./cache/latents",
             "dtype": "auto",
             "build_batch_size": 1,
+            "build_num_workers": None,
+            "build_pin_memory": None,
+            "build_prefetch_factor": None,
+            "build_persistent_workers": True,
         },
     },
     "optimizer": {

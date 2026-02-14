@@ -1,13 +1,21 @@
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Virtualenv
 venv/
+.venv/
+.env
 .env/
+.env.*
+!.env.example
 
 # Outputs / Models / Logs
 sdxl_ff_out*/
+.output
 .output*/
 cache*/
 new_beginning/
@@ -18,18 +26,24 @@ wandb/
 *.ckpt
 *.pt
 *.png
+!docs/**/*.png
 flash-attention/
 decoded_latents/
 # Daten
 data/images/
 data/*
-distillation/configs/
+!data/eval_prompts.example.json
+# Distillation templates versionieren; nur lokale Overrides ignorieren
+distillation/configs/cache_*.json
+distillation/configs/distill.json
+distillation/configs/distill2.json
+distillation/configs/*.local.json
+distillation/configs/*_local.json
+distillation/configs/local_*.json
 babesByStableYogi_ponyV4_diffusers/*
 juggernautXL_juggXIByRundiffusion_diffusers/*
 lustifySDXLNSFW_endgame_diffusers/*
 pornmaster_proSDXLV4VAE_diffusers/*
-waiIllustriousSDXL_v160_diffusers/*
-yomama25DIllustrious_illustriousV20_diffusers/*
 
 # Lokale Config
 config.json

@@ -1,0 +1,20 @@
+[
+  {
+    "prompt": "studio portrait of a futuristic knight, dramatic lighting",
+    "negative_prompt": "blurry, lowres",
+    "seed": 1337,
+    "height": 1152,
+    "width": 896
+  },
+  {
+    "prompt": "ultra wide photograph of a desert canyon at sunrise",
+    "negative_prompt": "overexposed, people",
+    "seed": 4242,
+    "resolution": "1344x768"
+  },
+  {
+    "prompt": "concept art of a cozy cabin in a snowy forest, warm interior glow",
+    "negative_prompt": "text, watermark",
+    "seed": 9001
+  }
+]
